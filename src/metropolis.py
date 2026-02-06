@@ -7,7 +7,7 @@ from netket.sampler.rules import MetropolisRule
 
 
 class LocalDoubleFlipRule(MetropolisRule):
-    r""" """
+    r""""""
 
     def transition(rule, sampler, machine, parameters, state, key, σ):
         double_flip, select_1, accept_1, select_2, accept_2 = jax.random.split(key, 5)

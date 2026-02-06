@@ -15,38 +15,34 @@
 from collections.abc import Callable
 
 from functools import partial
-
-
-import os
-
-# os.environ["JAX_PLATFORMS"] = "cpu"
-# os.environ["JAX_NUM_CPU_DEVICES"] = "2"
 import jax
 from jax.sharding import NamedSharding, PartitionSpec as P
-
-# jax.config.update("jax_platform_name", "cpu")
-print(jax.devices())
 import jax.numpy as jnp
 import numpy as np
 
-import jax.scipy as jsp
 from netket import stats
-from netket import config as nkconfig
-from netket.operator import AbstractOperator, DiscreteJaxOperator
-from netket.optimizer.qgt.qgt_jacobian import QGTJacobian_DefaultConstructor
+from netket.operator import AbstractOperator
 from netket.optimizer.qgt.qgt_jacobian_dense import convert_tree_to_dense_format
-from netket.utils.api_utils import partial_from_kwargs
 from netket.vqs import VariationalState, VariationalMixedState, MCState
 from netket.jax import tree_cast
-from netket.utils import timing, mpi, HashablePartial
+
+from netket.utils.api_utils import partial_from_kwargs
+from netket.optimizer.qgt.qgt_jacobian import QGTJacobian_DefaultConstructor
+
+from netket.utils import timing, HashablePartial
 from netket.jax._utils_tree import ravel_pytree
 from netket.utils.types import Sequence, PyTree, Array
+from netket.optimizer.linear_operator import LinearOperator, Uninitialized
+
 import netket.jax as nkjax
+from flax import struct
+
 
 from netket.experimental.driver.tdvp_common import TDVPBaseDriver, odefun
 from netket.experimental.dynamics._solver import AbstractSolver
 
 from tdvp_utils import make_monitor_dict, bridge_sample, ess_from_weights
+from netket.optimizer.qgt.common import check_valid_vector_type
 
 import platform
 
@@ -287,6 +283,7 @@ class TDVPSchmittBridgeJAXMg(TDVPBaseDriver):
 # found at github.com/markusschmitt/vmc_jax and licensed according to
 # MIT License, Copyright (c) 2021 Markus Schmitt
 
+
 @timing.timed
 @partial(
     jax.jit,
@@ -385,7 +382,7 @@ def _impl(
         ev_inv * regularizer2 < 1.0 / rcond, 1.0 / (ev_inv * regularizer2), jnp.nan
     )
 
-    return E, dw, rmd, snr, snr_F, ev, ev_reg
+    return S_L, E, dw, rmd, snr, snr_F, ev, ev_reg
 
 
 @odefun.dispatch
@@ -472,6 +469,7 @@ def odefun_custom(
     #     self.snr_atol,
     # )
     (
+        _S,
         self._loss_stats,
         self._dw,
         self._rmd,
@@ -490,19 +488,22 @@ def odefun_custom(
         self.rcond_smooth,
         self.snr_atol,
     )
-    # assert jax.tree.all(jax.tree.map(jnp.allclose, self._dw, old_dw)), "update differs"
 
-    # assert jnp.allclose(O, Op)
-    # print(S[0:4, 0:4])
-    # print(Sp[0:4, 0:4])
-
-    # assert jnp.allclose(S, Sp)
     self._monitor = make_monitor_dict(
         self._rmd, ess, self._snr, self._snr_F, self._ev, self._ev_reg
     )
+    pars_struct = jax.tree_util.tree_map(
+        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), state.parameters
+    )
     if stage == 0:
-        self._last_qgt = self._S
 
+        self._last_qgt = ShardedQGT(
+            S=_S,
+            _params_structure=pars_struct,
+        )
+        # mv1 = self._last_qgt @ self._dw
+        # mv2 = self._S @ self._dw
+        # print(jax.tree.all(jax.tree.map(jnp.allclose, mv1, mv2)))
     return self._dw
 
 
@@ -537,6 +538,47 @@ def prepare_input(
     return O_L
 
 
+@struct.dataclass
+class ShardedQGT(LinearOperator):
+    """
+    Semi-lazy representation of an S Matrix behaving like a linear operator.
+
+    The matrix of gradients O is computed on initialisation, but not S,
+    which can be computed by calling :code:`to_dense`.
+    The details on how the ⟨S⟩⁻¹⟨F⟩ system is solved are contained in
+    the field `sr`.
+    """
+
+    S: jnp.ndarray = Uninitialized  # type: ignore
+    """Gradients O_ij = ∂log ψ(σ_i)/∂p_j of the neural network
+    for all samples σ_i at given values of the parameters p_j
+    Average <O_j> subtracted for each parameter
+    Divided through with sqrt(#samples) to normalise S matrix
+    If scale is not None, columns normalised to unit norm
+    """
+
+    _in_solve: bool = struct.field(pytree_node=False, default=False)
+    """Internal flag used to signal that we are inside the _solve method and matmul should
+    not take apart into real and complex parts the other vector"""
+
+    _params_structure: PyTree = struct.field(pytree_node=False, default=Uninitialized)
+
+    @jax.jit
+    def __matmul__(self, vec: PyTree | jnp.ndarray) -> PyTree | jnp.ndarray:
+        if not hasattr(vec, "ndim") and not self._in_solve:
+            check_valid_vector_type(self._params_structure, vec)
+
+        # When we do matrix multiplication, we convert the input vector to
+        # the dense format used by the QGTJacobian. If we are using
+        vec, reassemble = convert_tree_to_dense_format(
+            vec, "complex", disable=self._in_solve
+        )
+        S = jax.lax.with_sharding_constraint(self.S, P("S", None))
+        result = S @ vec   
+
+        return reassemble(result)
+
+
 def main():
     import netket as nk
     from netket.experimental.dynamics import RK45
@@ -558,7 +600,7 @@ def main():
 
     T = 0.5
 
-    integrator = RK45(1e-3, adaptive=False, rtol=1e-4, dt_limits=(1e-4, 1e-2))
+    integrator = RK45(1e-3, adaptive=True, rtol=1e-4, dt_limits=(1e-4, 1e-2))
     tvmc_kwargs = {}
     driver = TDVPSchmittBridgeJAXMg(
         hamiltonian,
