@@ -4,3 +4,4 @@ networkx==3.3
 pytest==8.3.3
 jax[cuda12]==0.7.2
 qutip==5.1.0
+pfapack==1.0.2

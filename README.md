@@ -42,38 +42,6 @@ Notes:
 
 - `requirements.txt` pins `jax==0.7.2` (CPU install). If you want GPU acceleration, install the appropriate JAX build for your CUDA setup following the official JAX installation guide, then install the remaining requirements.
 
-## Quickstart: run the TFIM quench experiment
-
-From the repo root:
-
-```bash
-python experiments/tfim_quench_experiment.py \
-	--experiment_name test \
-	--L 3 \
-	--alpha 1 \
-	--seed 100 \
-	--n_samples_sr 2048 \
-	--n_samples_tvmc 4096 \
-	--hc_multiplier 1.0 \
-	--T 2.0 \
-	--n_save_times 20
-```
-
-What it does:
-
-1. Builds a 2D TFIM Hamiltonian on an `L×L` periodic square lattice.
-2. Finds a ground state for an initial Hamiltonian (via SR/VMC).
-3. Runs real-time TDVP dynamics with an adaptive integrator (NetKet `RK45`).
-4. Logs diagnostics (energy stats, residual, SNR summaries, ESS, etc.) and periodically checkpoints parameters.
-
-## Output / checkpointing
-
-The experiment uses `src/logger.py` to write checkpoint logs and parameters under:
-
-- `./data/...` by default (configurable with `--data_prepend`).
-
-Rerunning the same command with the same configuration will attempt to restore and continue from the existing log files.
-
 ## Notebooks
 
 The notebooks in `experiments/` assume a sibling folder `rbm_qsim/` is on the Python path and import `core.*`.
@@ -86,19 +54,4 @@ python -m pip install jupyter
 jupyter lab
 ```
 
-Then open any notebook in `experiments/`.
-
-## Development / tests
-
-```bash
-pytest -q
-```
-
-## Direct imports
-
-If you prefer not to use the compatibility `core` package, you can import directly from `src`:
-
-```python
-from src.schmitt_tdvp_bridge import TDVPSchmittBridge
-```
 

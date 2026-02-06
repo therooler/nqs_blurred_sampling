@@ -94,8 +94,6 @@ def main(N, n_samples_tvmc):
     # hamiltonian += sum([sigmaz(hilbert, i) @ sigmaz(hilbert, j) for i, j in graph.edges()])
     hamiltonian = nk.operator.IsingJax(hilbert=hilbert, graph=graph, h=-4., J=1.)
 
-    n_samples_list = [2**i for i in range(9, 15)]
-
     print(vstate.expect(sigma_z))
     fields_to_track = (
         ("t", "values"),
@@ -163,7 +161,7 @@ def main(N, n_samples_tvmc):
         vstate,
         integrator,
         t0=t0,
-        q=0.2,
+        q=0.9,
         snr_atol=2,
         rcond=1e-14,
         rcond_smooth=1e-10,
