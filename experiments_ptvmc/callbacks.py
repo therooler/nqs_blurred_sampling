@@ -176,8 +176,9 @@ def get_qgt_spectrum_callback(save_times):
 
 def get_parameter_save_callback(save_times, logger, starting_idx=0):
     save_times_tracked = save_times.copy()
-
-    def parameter_save_callback(step, log, driver):
+    def parameter_save_callback(s, log, driver):
+        step= driver.t
+        log["t"] = step
         hit = np.isclose(step, save_times_tracked, atol=driver.dt)
         if np.any(hit):
             idx = np.where(np.isclose(step, save_times_tracked, atol=driver.dt))[0]
