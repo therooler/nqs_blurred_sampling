@@ -25,6 +25,7 @@ def make_monitor_dict(rmd, ess, snr, snr_F, ev, ev_reg):
     -------
     metrics : dict of scalars (JAX arrays)
     """
+
     # Clean SNRs: replace inf/NaN with 0 for summary stats
     def _clean(x):
         x = jnp.where(jnp.isfinite(x), x, 0.0)
@@ -64,7 +65,6 @@ def make_monitor_dict(rmd, ess, snr, snr_F, ev, ev_reg):
         "ev_reg": ev_reg_clean,
     }
     return metrics
-
 
 
 @jax.jit
@@ -145,14 +145,14 @@ def bridge_sample(
         _x = _x.reshape(-1)
         # Connected elements of Hamiltonian
         x_conn, _ = op.get_conn_padded(_x)
-        #NOTE: get_conn_padded(_x) can contain diagonal elements, which correspond to "stay" configuration
+        # NOTE: get_conn_padded(_x) can contain diagonal elements, which correspond to "stay" configuration
         # For Ising, the first element will be diagonal, we therefore only have nconn-1 off-diagonal elements
         n_conn = x_conn.shape[-1] - 1
         idx = jnp.floor(u2 * n_conn).astype(jnp.int32)
         # Only choose from off-diagonal elements
-        proposed = x_conn[idx+1]
+        proposed = x_conn[idx + 1]
         # choose a whether to flip or stay
-        x_p = jnp.where(u1 > q, _x, proposed) # equivalent to u1 < 1-q
+        x_p = jnp.where(u1 > q, _x, proposed)  # equivalent to u1 < 1-q
         x_p_conn, mels = op.get_conn_padded(x_p)
         # log |psi| for flipped and all neighbors
         logpsi_stay = apply_fn({"params": params}, x_p)
@@ -162,7 +162,9 @@ def bridge_sample(
         logp_all = 2.0 * logpsi_all.real  # (n,)
         # stable mixture weight: (1-q)*p(stay) + (q/n)*sum_j p(all_flipped_j)
         log_term_main = jnp.log1p(-q) + logp_stay
-        log_term_flips = jnp.log(q) - jnp.log(n_conn) + jsp.special.logsumexp(logp_all[1:])
+        log_term_flips = (
+            jnp.log(q) - jnp.log(n_conn) + jsp.special.logsumexp(logp_all[1:])
+        )
         log_w_bridge = jsp.special.logsumexp(jnp.stack([log_term_main, log_term_flips]))
         w_bridge = jnp.exp(logp_stay - log_w_bridge)  # scalar
         # Calculate local energies

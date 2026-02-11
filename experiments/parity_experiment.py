@@ -18,20 +18,22 @@ from netket.experimental.dynamics import RK45
 from callbacks import (
     get_acceptance_rate_callback,
     get_umbrella_monitor_callback,
+    get_tdvp_monitor_callback,
     get_parameter_save_callback,
 )
 from logger import Logger
 
 # from schmitt_tdvp_bridge_jaxmg import TDVPSchmittBridgeJAXMg as DynamicsDriver
-from schmitt_tdvp_bridge import TDVPSchmittBridge as DynamicsDriver
+from schmitt_tdvp_bridge import TDVPSchmittBridge
+from schmitt_tdvp import TDVPSchmitt
 
 import argparse
 import numpy as np
 
 
-def main(N, n_samples_tvmc):
+def main(N, n_samples_tvmc, driver_type):
 
-    alpha = 8
+    alpha = 4
     hilbert = nk.hilbert.Spin(s=1 / 2, N=N)
 
     def get_model():
@@ -130,7 +132,12 @@ def main(N, n_samples_tvmc):
 
     T = 2.0
     save_times = np.linspace(0.0, T, 40)
-    exp_name = f"bridge_{n_samples_tvmc}"
+    if driver_type == "bridge":
+        exp_name = f"bridge_{n_samples_tvmc}"
+    elif driver_type == "vanilla":
+        exp_name = f"vanilla_{n_samples_tvmc}"
+    else:
+        raise NotImplementedError
     # Make sure we always start with the same state in notebook
 
     save_path = f"./data/TFIM_{N}_{alpha}_parity/{exp_name}/"
@@ -158,26 +165,44 @@ def main(N, n_samples_tvmc):
     callbacks.append(measure_parity)
     acceptance_rate_callback = get_acceptance_rate_callback()
     callbacks.append(acceptance_rate_callback)
-    tdvp_monitor_callback = get_umbrella_monitor_callback(save_times, save_path)
+    if driver_type=="bridge":
+        tdvp_monitor_callback = get_umbrella_monitor_callback(save_times, save_path)
+    elif driver_type == "vanilla":
+        tdvp_monitor_callback = get_tdvp_monitor_callback(save_times, save_path)
     callbacks.append(tdvp_monitor_callback)
     parameter_save_callback = get_parameter_save_callback(save_times, logger)
     callbacks.append(parameter_save_callback)
 
     integrator = RK45(dt, adaptive=True, rtol=1e-4, dt_limits=(1e-5, 1e-2))
     tvmc_kwargs = {}
-    driver = DynamicsDriver(
-        hamiltonian,
-        vstate,
-        integrator,
-        t0=t0,
-        q=0.9,
-        snr_atol=2,
-        rcond=1e-14,
-        rcond_smooth=1e-10,
-        **tvmc_kwargs,
-    )
 
-    driver.run(
+    if driver_type == "bridge":
+        dynamics = TDVPSchmittBridge(
+            hamiltonian,
+            vstate,
+            integrator,
+            t0=t0,
+            q=0.9,
+            snr_atol=2,
+            rcond=1e-14,
+            rcond_smooth=1e-10,
+            **tvmc_kwargs,
+        )
+    elif driver_type == "vanilla":
+        dynamics = TDVPSchmitt(
+            hamiltonian,
+            vstate,
+            integrator,
+            t0=t0,
+            snr_atol=2,
+            rcond=1e-14,
+            rcond_smooth=1e-10,
+            **tvmc_kwargs,
+        )
+    else:
+        raise NotImplementedError
+
+    dynamics.run(
         T,
         out=logger,
         callback=callbacks,
@@ -191,5 +216,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--N", default=20, type=int)
     parser.add_argument("--power", default=10, type=int)
+    parser.add_argument("--driver_type", default="vanilla", type=str)
     args = parser.parse_args()
-    main(int(args.N), 2 ** int(args.power))
+    main(int(args.N), 2 ** int(args.power), args.driver_type)

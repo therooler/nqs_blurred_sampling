@@ -2,10 +2,11 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Tuple
+import ast
 
 # Ensure `rbm_qsim/` is importable regardless of current working directory.
 _THIS_DIR = Path(__file__).resolve().parent
-sys.path.append(str((_THIS_DIR / ".." / "rbm_qsim").resolve()))
+sys.path.append(str((_THIS_DIR / ".." / "src").resolve()))
 import netket as nk
 import numpy as np
 
@@ -13,15 +14,16 @@ from netket.operator.spin import sigmax, sigmaz
 from netket.experimental.dynamics import RK45
 import optax
 
-from core.callbacks import (
+from callbacks import (
     get_parameter_save_callback,
     get_umbrella_monitor_callback,
+    get_acceptance_rate_callback,
 )
+from metropolis import LocalZ2FlipRule
+from logger import Logger
 
-from core.logger import Logger
-
-from core.schmitt_tdvp_bridge import TDVPSchmittBridge
-
+from schmitt_tdvp_bridge import TDVPSchmittBridge
+from models import CNN
 
 fields_to_track = (
     ("t", "values"),
@@ -43,6 +45,7 @@ fields_to_track = (
     ("q_bridge", "values"),
     ("mx", "Mean"),
     ("mx", "Variance"),
+    ("acceptance_rate", "values"),
 )
 
 
@@ -59,7 +62,8 @@ def get_save_path(config: dict, *, create: bool = True) -> Tuple[str, str]:
         "experiment_name",
         "L",
         "seed",
-        "alpha",
+        "kernel_size",
+        "channels",
         "n_samples_sr",
         "n_samples_tvmc",
         "hc_multiplier",
@@ -69,17 +73,17 @@ def get_save_path(config: dict, *, create: bool = True) -> Tuple[str, str]:
         raise KeyError(f"Missing required config keys for save_path(): {missing}")
 
     root = Path(config.get("data_prepend", "./data")).expanduser()
-
+    channel_str = "(" + "_".join(map(str, config["channels"])) + ")"
     parts_tvmc = [
         "TFIM_QUENCH",
         str(config["experiment_name"]),
         f"L_{int(config['L'])}",
-        f"RBM_alpha_{int(config['alpha'])}",
+        f"CNN_K_{int(config['kernel_size'])}_C_{channel_str}",
         f"seed_{int(config['seed'])}",
         f"Ns_SR_{int(config['n_samples_sr'])}",
         f"hc_mult_{float(config['hc_multiplier']):1.3f}",
         f"T_{float(config['T']):1.3f}",
-        f"Ns_TVMC_{float(config['n_samples_sr']):1.3f}",
+        f"Ns_TVMC_{int(config['n_samples_tvmc'])}",
     ]
     parts_sr = parts_tvmc[:6]
     out_dir_sr = root.joinpath(*parts_sr)
@@ -92,10 +96,15 @@ def get_save_path(config: dict, *, create: bool = True) -> Tuple[str, str]:
 def main(config, return_save_paths: bool = False, return_logger: bool = False):
     L = int(config["L"])
     seed = int(config["seed"])
-    alpha = int(config["alpha"])
     n_samples_sr = int(config.get("n_samples_sr", 2048))
     n_samples_tvmc = int(config["n_samples_tvmc"])
     hc_multiplier = float(config.get("hc_multiplier", 1.0))
+    kernel_size = int(config.get("kernel_size", 2))
+    channels = tuple(config.get("channels", (2,)))
+
+    assert (
+        kernel_size <= L
+    ), f"kernel size must be smaller than lattice size, received K={kernel_size} for L = {L}"
     if return_save_paths:
         return get_save_path(config, create=False)
     else:
@@ -108,17 +117,17 @@ def main(config, return_save_paths: bool = False, return_logger: bool = False):
         else:
             raise ValueError(f"No logger found at {save_path_tvmc}")
     # 2D Lattice
-    g = nk.graph.Hypercube(length=L, n_dim=2, pbc=True)
+    graph = nk.graph.Hypercube(length=L, n_dim=2, pbc=True)
     # Hilbert space of spins on the graph
-    hi = nk.hilbert.Spin(s=1 / 2, N=g.n_nodes, inverted_ordering=False)
+    hi = nk.hilbert.Spin(s=1 / 2, N=graph.n_nodes, inverted_ordering=False)
     # Ising coeffs
     J = 1
     hc = 3.044 * J
     h = hc * hc_multiplier
     # Hamiltonian
-    ha = sum([-J * sigmaz(hi, i) @ sigmaz(hi, j) for i, j in g.edges()])
-    ha += sum([-h * sigmax(hi, i) for i in g.nodes()])
-    mx = sum([sigmax(hi, i) for i in g.nodes()]) / g.n_nodes
+    ha = sum([-J * sigmaz(hi, i) @ sigmaz(hi, j) for i, j in graph.edges()])
+    ha += sum([-h * sigmax(hi, i) for i in graph.nodes()])
+    mx = sum([sigmax(hi, i) for i in graph.nodes()]) / graph.n_nodes
     hamiltonian = ha.to_jax_operator()
     mx = mx.to_jax_operator()
     # Times
@@ -126,16 +135,23 @@ def main(config, return_save_paths: bool = False, return_logger: bool = False):
     n_save_times = int(config.get("n_save_times", 20))
     save_times = np.linspace(0.0, T, n_save_times)
     # Monte Carlo Sampling
-    sampler = nk.sampler.MetropolisLocal(hi, n_chains=n_samples_sr)
-    model = nk.models.RBM(complex, alpha=alpha)
+    sampler = nk.sampler.MetropolisSampler(hi, LocalZ2FlipRule(), n_chains=n_samples_sr)
+    model = CNN(
+        lattice=graph,
+        kernel_size=(kernel_size**2,),
+        channels=channels,
+        param_dtype=complex,
+    )
     # Variational State
     vstate = nk.vqs.MCState(
-        sampler, model, n_samples=n_samples_sr, seed=seed, sampler_seed=seed
+        sampler, model, n_samples=n_samples_sr, seed=seed, sampler_seed=seed, chunk_size=2**13
     )
     print("Number of parameters: ", vstate.n_parameters)
-    ha_gs = sum([-sigmax(hi, i) for i in g.nodes()])
+
+    # perturbation = 1e-3
+    ha_gs = sum([-sigmax(hi, i) for i in graph.nodes()])
     ha_gs = ha_gs.to_jax_operator()
-    print(save_path_sr)
+    # ha_gs = nk.operator.IsingJax(hilbert=hi, graph=graph, h=-1., J=-10.)
     logger_sr = Logger(
         path=save_path_sr, fields=(("Generator", "Mean"), ("Generator", "Variance"))
     )
@@ -150,20 +166,22 @@ def main(config, return_save_paths: bool = False, return_logger: bool = False):
             hamiltonian=ha_gs,
             variational_state=vstate,
             optimizer=optax.sgd(0.05),
-            diag_shift=1e-6,
-            use_ntk=True,
+            diag_shift=1e-4,
+            use_ntk=False,
+            on_the_fly=False,
         )
         init_driver.run(n_iter=150, out=logger_sr)
         logger_sr.flush(vstate, done=True)
 
     logger_tvmc = Logger(path=save_path_tvmc, fields=fields_to_track)
     restored = logger_tvmc.restore()
+    dt_min_lim = 1e-5
     if restored:
         t0 = logger_tvmc["t"]["values"][-1]
         dt = logger_tvmc["dt"]["values"][-1]
     else:
         t0 = 0.0
-        dt = 1e-4
+        dt = dt_min_lim
     print(f"Starting from {t0}")
     if not logger_tvmc.done:
         vstate.n_samples = n_samples_tvmc
@@ -173,24 +191,24 @@ def main(config, return_save_paths: bool = False, return_logger: bool = False):
             vstate.sample()
         # Callbacks for dynamics
         callbacks = []
+        acceptance_rate_callback = get_acceptance_rate_callback()
+        callbacks.append(acceptance_rate_callback)
         callbacks.append(get_observable_callback(mx, "mx"))
         callbacks.append(get_umbrella_monitor_callback(save_times, save_path_tvmc))
         callbacks.append(get_parameter_save_callback(save_times, logger_tvmc))
 
-        integrator = RK45(dt, adaptive=True, rtol=1e-4, dt_limits=(1e-4, 1e-2))
+        integrator = RK45(dt, adaptive=True, rtol=1e-7, dt_limits=(dt_min_lim, 1e-2))
 
         driver = TDVPSchmittBridge(
             hamiltonian,
             vstate,
             integrator,
-            t0=0,
-            q0=float(config.get("q0", 0.5)),
-            q_min=0.0,
-            ess_target=float(config.get("ess_target", 100)),
+            t0=t0,
+            q=float(config.get("q0", 0.5)),
             holomorphic=False,
-            snr_atol=2.0,
+            snr_atol=8.0,
             rcond=1e-14,
-            rcond_smooth=1e-10,
+            rcond_smooth=1e-8,
         )
 
         driver.run(
@@ -207,15 +225,17 @@ def main(config, return_save_paths: bool = False, return_logger: bool = False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--L", default=3, type=int)
-    parser.add_argument("--alpha", default=1, type=int, help="NetKet RBM alpha")
     parser.add_argument("--hc_multiplier", default=1.0, type=float)
     parser.add_argument("--seed", default=100, type=int)
-    parser.add_argument("--n_samples_sr", default=2048, type=int)
-    parser.add_argument("--n_samples_tvmc", default=2**12, type=int)
-    parser.add_argument("--experiment_name", default="test", type=str)
+    parser.add_argument("--q", default=0.5, type=float)
+    parser.add_argument("--n_samples_sr", default=2**12, type=int)
+    parser.add_argument("--kernel_size", default=2, type=int)
+    parser.add_argument("--channels", default="(5, 4, 3)", type=lambda x: tuple(ast.literal_eval(x)))
+    parser.add_argument("--power", default=12, type=int)
+    parser.add_argument("--experiment_name", default="Feb11", type=str)
     parser.add_argument("--data_prepend", default="./data", type=str)
-    parser.add_argument("--T", default=2.0, type=float)
-    parser.add_argument("--n_save_times", default=20, type=int)
+    parser.add_argument("--T", default=4.0, type=float)
+    parser.add_argument("--n_save_times", default=40, type=int)
     args = parser.parse_args()
 
     config = {
@@ -223,13 +243,14 @@ if __name__ == "__main__":
         "data_prepend": args.data_prepend,
         "L": int(args.L),
         "seed": int(args.seed),
-        "alpha": int(args.alpha),
         "n_samples_sr": int(args.n_samples_sr),
-        "n_samples_tvmc": int(args.n_samples_tvmc),
+        "n_samples_tvmc": 2 ** int(args.power),
         "hc_multiplier": float(args.hc_multiplier),
         "T": float(args.T),
         "n_save_times": int(args.n_save_times),
-        "q0": 1.0,
+        "q": float(args.q),
+        "kernel_size": int(args.kernel_size),
+        "channels": args.channels,
     }
 
     main(config)

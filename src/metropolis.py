@@ -1,11 +1,10 @@
 import jax
-
-
+from dataclasses import dataclass
 from netket.hilbert.random import flip_state
-
 from netket.sampler.rules import MetropolisRule
 
 
+@dataclass
 class LocalDoubleFlipRule(MetropolisRule):
     r""""""
 
@@ -34,5 +33,29 @@ class LocalDoubleFlipRule(MetropolisRule):
 
         return σpp, None
 
-    def __repr__(self):
-        return "LocalDoubleFlipRule()"
+
+@dataclass
+class LocalZ2FlipRule(MetropolisRule):
+    r""""""
+
+    def transition(rule, sampler, machine, parameters, state, key, σ):
+        global_flip, select_1, accept_1 = jax.random.split(key, 3)
+
+        n_chains = σ.shape[0]
+        hilb = sampler.hilbert
+        u = jax.random.uniform(global_flip, shape=())
+        indxs = jax.random.randint(
+            select_1, shape=(n_chains,), minval=0, maxval=hilb.size
+        )
+        σp, _ = flip_state(hilb, accept_1, σ, indxs)
+
+        def true_branch(x):
+            return x * -1
+
+        def false_branch(x):
+            return x
+
+        # with probability 1/200 flip global state
+        σpp = jax.lax.cond(u < 0.1, true_branch, false_branch, operand=σp)
+
+        return σpp, None

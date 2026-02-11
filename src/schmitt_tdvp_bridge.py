@@ -230,6 +230,7 @@ class TDVPSchmittBridge(TDVPBaseDriver):
                 tstops = tstops[1:]
 
             step_accepted = False
+            print("dt:", self.dt)
             while not step_accepted:
                 if not always_stop and len(tstops) > 0:
                     max_dt = tstops[0] - self.t
@@ -296,7 +297,6 @@ def _impl(
         jnp.abs(OE_mean) * jnp.sqrt(n_samples) / jnp.sqrt(OE_var + eps),
     )
     F = stats.sum(OEdata, axis=0)
-
     # Note: this implementation differs from Eq. 20 in Markus's paper, which I would
     # implement as `rho = mpi.mean(QEdata, axis=0)`. However, this is different from
     # changing the basis AFTER averaging over the samples, and leads to the wrong
@@ -370,6 +370,7 @@ def odefun_custom(
 
     # Monitor ESS of the combined weights
     ess = ess_from_weights(importance_weights)
+    print("ESS", ess, "q", self.q)
     # Normalize weights for use as a pdf
     importance_weights = importance_weights / jnp.mean(importance_weights)
 
