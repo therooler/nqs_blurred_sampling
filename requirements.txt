@@ -6,3 +6,4 @@ jax[cuda12]==0.8.1
 flax==0.12.3
 qutip==5.1.0
 pfapack==1.0.2
+jupyter==5.9.1

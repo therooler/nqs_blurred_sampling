@@ -32,17 +32,17 @@ import numpy as np
 
 from gaussian_state import GaussianState
 
-def main(N, n_samples_tvmc, driver_type, q):
 
-    alpha = 1
+def main(N, n_samples_tvmc, driver_type, q, h, chunk_size):
+    print(N, n_samples_tvmc, driver_type, q, h)
     hilbert = nk.hilbert.Spin(s=1 / 2, N=N)
 
-    def get_model():
-        return GaussianState()
+    def get_model(dtype):
+        return GaussianState(param_dtype=dtype)
 
-    def get_vstate(n_samples):
+    def get_vstates(n_samples, sampling_dtype=jnp.float64):
         seed = 300
-        model = get_model()
+        model = get_model(jnp.float64)
         sampler = nk.sampler.MetropolisSampler(
             hilbert, LocalDoubleFlipRule(), n_chains=n_samples
         )
@@ -53,11 +53,24 @@ def main(N, n_samples_tvmc, driver_type, q):
             seed=seed,
             sampler_seed=seed,
             n_discard_per_chain=0,
+            chunk_size=chunk_size
+        )
+        model_sampling = get_model(sampling_dtype)
+        sampler_sampling = nk.sampler.MetropolisSampler(
+            hilbert, LocalDoubleFlipRule(), n_chains=n_samples, dtype=sampling_dtype
+        )
+        vstate_sampling = nk.vqs.MCState(
+            sampler=sampler_sampling,
+            model=model_sampling,
+            n_samples=n_samples,
+            seed=seed,
+            sampler_seed=seed,
+            n_discard_per_chain=0,
         )
 
-        return vstate
+        return vstate, vstate_sampling
 
-    vstate = get_vstate(2**10)
+    vstate, _ = get_vstates(2**10)
     sigma_z = nk.operator.PauliStringsJax(hilbert, "Z" * N, 1.0)
     Pz = nk.operator.PauliStringsJax(hilbert, "Z" * N, -1.0)
     graph = nk.graph.Chain(N, pbc=True)
@@ -70,7 +83,7 @@ def main(N, n_samples_tvmc, driver_type, q):
     graph = nk.graph.Chain(N, pbc=True)
     # hamiltonian = sum([sigmax(hilbert, i) for i in graph.nodes()])
     # hamiltonian += sum([sigmaz(hilbert, i) @ sigmaz(hilbert, j) for i, j in graph.edges()])
-    h = 1.
+    print(f"h={h:1.3f}")
     hamiltonian = nk.operator.IsingJax(hilbert=hilbert, graph=graph, h=-h, J=1.0)
 
     print(vstate.expect(sigma_z))
@@ -110,7 +123,7 @@ def main(N, n_samples_tvmc, driver_type, q):
         raise NotImplementedError
     # Make sure we always start with the same state in notebook
 
-    save_path = f"./data/TFIM_PFAFF_{N}_{alpha}_parity/{exp_name}/"
+    save_path = f"./data/TFIM_PFAFF_{N}_parity/{exp_name}/"
 
     logger = Logger(path=save_path, fields=fields_to_track)
     if logger.restore():
@@ -126,16 +139,18 @@ def main(N, n_samples_tvmc, driver_type, q):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-    vstate = get_vstate(n_samples_tvmc)
+    vstate, vstate_sampling = get_vstates(n_samples_tvmc, jnp.float32)
+    print(f"Number of parameters: {vstate.n_parameters}")
     # Thermalize
     for i in range(1):
         vstate.sample()
+        vstate_sampling.sample()
 
     callbacks = []
     callbacks.append(measure_parity)
     acceptance_rate_callback = get_acceptance_rate_callback()
     callbacks.append(acceptance_rate_callback)
-    if driver_type=="bridge":
+    if driver_type == "bridge":
         tdvp_monitor_callback = get_umbrella_monitor_callback(save_times, save_path)
     elif driver_type == "vanilla":
         tdvp_monitor_callback = get_tdvp_monitor_callback(save_times, save_path)
@@ -156,6 +171,8 @@ def main(N, n_samples_tvmc, driver_type, q):
             snr_atol=2,
             rcond=1e-14,
             rcond_smooth=1e-10,
+            sampling_state=vstate_sampling,
+            distributed_eigh=True,
             **tvmc_kwargs,
         )
     elif driver_type == "vanilla":
@@ -188,5 +205,15 @@ if __name__ == "__main__":
     parser.add_argument("--power", default=10, type=int)
     parser.add_argument("--driver_type", default="vanilla", type=str)
     parser.add_argument("--q", default=0.5, type=float)
+    parser.add_argument("--h", default=1.0, type=float)
+    parser.add_argument("--chunk_size", type=int)
     args = parser.parse_args()
-    main(int(args.N), 2 ** int(args.power), args.driver_type, float(args.q))
+    print(args.chunk_size)
+    main(
+        int(args.N),
+        2 ** int(args.power),
+        args.driver_type,
+        float(args.q),
+        float(args.h),
+        args.chunk_size
+    )

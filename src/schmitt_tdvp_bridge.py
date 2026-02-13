@@ -36,6 +36,21 @@ from netket.experimental.driver.tdvp_common import TDVPBaseDriver, odefun
 from netket.experimental.dynamics._solver import AbstractSolver
 
 from tdvp_utils import make_monitor_dict, bridge_sample, ess_from_weights
+from jax.sharding import PartitionSpec as P
+
+import platform
+import os
+
+system = platform.system()
+if system == "Linux" and os.environ.get("ENABLE_JAXMG") == "1":
+    try:
+        from jaxmg import syevd
+
+        JAXMG_ENABLED = True
+    except ModuleNotFoundError:
+        JAXMG_ENABLED = False
+else:
+    JAXMG_ENABLED = False
 
 
 class TDVPSchmittBridge(TDVPBaseDriver):
@@ -122,7 +137,8 @@ class TDVPSchmittBridge(TDVPBaseDriver):
         rcond: float = 1e-14,
         rcond_smooth: float = 1e-8,
         snr_atol: float | None,
-        sampling_state: VariationalState,
+        sampling_state: VariationalState = None,
+        distributed_eigh: bool = False,
     ):
         r"""
         Initializes the time evolution driver.
@@ -192,6 +208,13 @@ class TDVPSchmittBridge(TDVPBaseDriver):
         if not (0 < q < 1):
             raise ValueError(f"`q` must satisfy 0 < q < 1, received {q}")
         self.q = q
+        if distributed_eigh and not JAXMG_ENABLED:
+            raise ImportError(
+                "distributed_eigh=True requires jaxmg to be installed and enabled. "
+                "Please install jaxmg (pip install jaxmg) and set the environment variable "
+                "ENABLE_JAXMG=1 before running. This feature is only available on Linux systems."
+            )
+        self.distributed_eigh = distributed_eigh
 
         if sampling_state is not None:
             if not isinstance(sampling_state, VariationalState):
@@ -286,7 +309,16 @@ class TDVPSchmittBridge(TDVPBaseDriver):
 
 
 @timing.timed
-@partial(jax.jit, static_argnames=("n_samples", " rcond", "rcond_smooth", "snr_atol"))
+@partial(
+    jax.jit,
+    static_argnames=(
+        "n_samples",
+        "rcond",
+        "rcond_smooth",
+        "snr_atol",
+        "distributed_eigh",
+    ),
+)
 def _impl(
     parameters,
     n_samples,
@@ -297,6 +329,7 @@ def _impl(
     rcond,
     rcond_smooth,
     snr_atol,
+    distributed_eigh,
 ):
     E = stats.statistics(importance_weights * E_loc)
     ΔE_loc = E_loc.reshape(-1, 1) - E.mean
@@ -311,7 +344,15 @@ def _impl(
         importance_weights / importance_weights.shape[0]
     )  # Undo PDF since it's already in ΔE_loc
     Sd = S.to_dense()
-    ev, V = jnp.linalg.eigh(Sd)
+    if distributed_eigh:
+        Sd = jax.lax.with_sharding_constraint(Sd, P("S", None))
+        mesh = jax.sharding.get_abstract_mesh()
+        print("Using syevd")
+        ev, V = syevd(Sd, T_A=1024, mesh=mesh, in_specs=(P("S", None),))
+    else:
+
+        ev, V = jnp.linalg.eigh(Sd)
+
     OEdata = O.conj() * ΔE_loc
     # SNR of the force estimator F = sum_i O_i^* ΔE_i
     OE_mean = stats.mean(OEdata, axis=0)
@@ -323,10 +364,7 @@ def _impl(
         jnp.abs(OE_mean) * jnp.sqrt(n_samples) / jnp.sqrt(OE_var + eps),
     )
     F = stats.sum(OEdata, axis=0)
-    # Note: this implementation differs from Eq. 20 in Markus's paper, which I would
-    # implement as `rho = mpi.mean(QEdata, axis=0)`. However, this is different from
-    # changing the basis AFTER averaging over the samples, and leads to the wrong
-    # normalisation of RHo.
+    # eigenbasis
     Q = jnp.tensordot(V.conj().T, O.T, axes=1).T
     QEdata = Q.conj() * ΔE_loc
     rho = V.conj().T @ F
@@ -346,11 +384,12 @@ def _impl(
     ev_inv = jnp.where(jnp.abs(ev / ev[-1]) > rcond, 1.0 / ev, 0.0)
     # Set regularizer for singular value cutoff
     regularizer = 1.0 / (1.0 + (rcond_smooth / jnp.abs(ev / ev[-1])) ** 6)
-    # Construct a soft cutoff based on the SNR
-    regularizer2 = regularizer * (1.0 / (1.0 + (snr_atol / snr) ** 6))
+    if snr_atol is not None:
+        # Construct a soft cutoff based on the SNR
+        regularizer = regularizer * (1.0 / (1.0 + (snr_atol / snr) ** 6))
 
     # solve the linear system by hand
-    eta_p = ev_inv * regularizer2 * rhs_coeff * rho
+    eta_p = ev_inv * regularizer * rhs_coeff * rho
     # convert back to the parameter space
     update = V @ eta_p
 
@@ -363,7 +402,7 @@ def _impl(
     # If parameters are real, then take only real part of the gradient (if it's complex)
     dw = tree_cast(update_tree, parameters)
     ev_reg = jnp.where(
-        ev_inv * regularizer2 < 1.0 / rcond, 1.0 / (ev_inv * regularizer2), jnp.nan
+        ev_inv * regularizer < 1.0 / rcond, 1.0 / (ev_inv * regularizer), jnp.nan
     )
 
     return E, dw, rmd, snr, snr_F, ev, ev_reg
@@ -384,7 +423,7 @@ def odefun_custom(
     # Allow sampling in lower precision
     if self.sampling_state is not None:
         # Cast parameters to sampling_state dtype and assign
-        self.sampling_state.parameters = tree_cast(w, self.sampling_dtype)
+        self.sampling_state.parameters = tree_cast(w, self.sampling_state.parameters)
         self.sampling_state.reset()
         samples = self.sampling_state.samples
     else:
@@ -441,6 +480,7 @@ def odefun_custom(
         self.rcond,
         self.rcond_smooth,
         self.snr_atol,
+        self.distributed_eigh,
     )
     self._monitor = make_monitor_dict(
         self._rmd, ess, self._snr, self._snr_F, self._ev, self._ev_reg
@@ -466,3 +506,50 @@ def ess_from_weights_var(w):
     s1_sq = jnp.mean(w, axis=0) ** 2
     s2 = jnp.mean(w**2, axis=0)
     return ((s1_sq / (s2 - s1_sq + jnp.finfo(w.dtype).eps))).squeeze()
+
+
+def main():
+    import netket as nk
+    from netket.experimental.dynamics import RK45
+    import flax.linen as nn
+
+    N = 4
+    alpha = 1
+    n_samples = 2**12
+    hilbert = nk.hilbert.Spin(s=1 / 2, N=N)
+    graph = nk.graph.Chain(N, pbc=True)
+    hamiltonian = nk.operator.IsingJax(hilbert=hilbert, graph=graph, h=1, J=-1.0)
+    sampler = nk.sampler.MetropolisLocal(hilbert, n_chains=n_samples)
+    model = nk.models.RBM(
+        alpha=alpha, param_dtype=complex, kernel_init=nn.initializers.normal(1e-1)
+    )
+    vstate = nk.vqs.MCState(
+        sampler=sampler, model=model, n_samples=n_samples, seed=100, sampler_seed=100
+    )
+
+    T = 0.5
+
+    integrator = RK45(1e-3, adaptive=True, rtol=1e-4, dt_limits=(1e-4, 1e-2))
+    tvmc_kwargs = {}
+    driver = TDVPSchmittBridge(
+        hamiltonian,
+        vstate,
+        integrator,
+        t0=0,
+        q=0.2,
+        snr_atol=2,
+        rcond=1e-14,
+        rcond_smooth=1e-10,
+        distributed_eigh=True,
+        **tvmc_kwargs,
+    )
+
+    driver.run(
+        T,
+        show_progress=True,
+        timeit=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

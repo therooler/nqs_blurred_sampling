@@ -158,17 +158,17 @@ def main(N, n_samples_tvmc, driver_type, q):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-    vstate = get_vstate(n_samples_tvmc)
-    if 1 and driver_type == "vanilla":
-        with open(
-            f"./data/TFIM_{N}_{alpha}_parity/bridge_{2**12}_{0.5:1.2f}/"
-            + f"log_params_1.mpack",
-            "rb",
-        ) as infile:
-            binary_data = infile.read()
-            vstate.variables = serialization.from_bytes(vstate.variables, binary_data)
-            vstate.variables = jax.tree.map(lambda x: jnp.array(x), vstate.variables)
-        t0 = 0.05
+    # vstate = get_vstate(n_samples_tvmc)
+    # if 1 and driver_type == "vanilla":
+    #     with open(
+    #         f"./data/TFIM_{N}_{alpha}_parity/bridge_{2**12}_{0.5:1.2f}/"
+    #         + f"log_params_1.mpack",
+    #         "rb",
+    #     ) as infile:
+    #         binary_data = infile.read()
+    #         vstate.variables = serialization.from_bytes(vstate.variables, binary_data)
+    #         vstate.variables = jax.tree.map(lambda x: jnp.array(x), vstate.variables)
+    #     t0 = 0.05
     # Thermalize
     for i in range(1):
         vstate.sample()
