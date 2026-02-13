@@ -175,7 +175,7 @@ def main(config, return_save_paths: bool = False, return_logger: bool = False):
 
     logger_tvmc = Logger(path=save_path_tvmc, fields=fields_to_track)
     restored = logger_tvmc.restore()
-    dt_min_lim = 1e-5
+    dt_min_lim = 5e-5
     if restored:
         t0 = logger_tvmc["t"]["values"][-1]
         dt = logger_tvmc["dt"]["values"][-1]
@@ -197,7 +197,7 @@ def main(config, return_save_paths: bool = False, return_logger: bool = False):
         callbacks.append(get_umbrella_monitor_callback(save_times, save_path_tvmc))
         callbacks.append(get_parameter_save_callback(save_times, logger_tvmc))
 
-        integrator = RK45(dt, adaptive=True, rtol=1e-7, dt_limits=(dt_min_lim, 1e-2))
+        integrator = RK45(dt, adaptive=True, rtol=1e-4, dt_limits=(dt_min_lim, 1e-2))
 
         driver = TDVPSchmittBridge(
             hamiltonian,
@@ -206,9 +206,9 @@ def main(config, return_save_paths: bool = False, return_logger: bool = False):
             t0=t0,
             q=float(config.get("q0", 0.5)),
             holomorphic=False,
-            snr_atol=8.0,
+            snr_atol=2.0,
             rcond=1e-14,
-            rcond_smooth=1e-8,
+            rcond_smooth=1e-9,
         )
 
         driver.run(

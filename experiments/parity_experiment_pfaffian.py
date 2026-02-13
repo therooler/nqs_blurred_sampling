@@ -22,7 +22,6 @@ from callbacks import (
     get_parameter_save_callback,
 )
 from logger import Logger
-from flax import serialization
 
 # from schmitt_tdvp_bridge_jaxmg import TDVPSchmittBridgeJAXMg as DynamicsDriver
 from schmitt_tdvp_bridge import TDVPSchmittBridge
@@ -31,17 +30,15 @@ from schmitt_tdvp import TDVPSchmitt
 import argparse
 import numpy as np
 
+from gaussian_state import GaussianState
 
 def main(N, n_samples_tvmc, driver_type, q):
 
-    alpha = 4
+    alpha = 1
     hilbert = nk.hilbert.Spin(s=1 / 2, N=N)
 
     def get_model():
-        return nk.models.RBM(
-            alpha=alpha,
-            param_dtype=complex,
-        )
+        return GaussianState()
 
     def get_vstate(n_samples):
         seed = 300
@@ -55,38 +52,9 @@ def main(N, n_samples_tvmc, driver_type, q):
             n_samples=n_samples,
             seed=seed,
             sampler_seed=seed,
+            n_discard_per_chain=0,
         )
 
-        # zero everything
-        pars = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), vstate.parameters)
-
-        W = pars["Dense"]["kernel"]
-        a = pars["visible_bias"]
-        b = pars["Dense"]["bias"]
-        n = hilbert.size
-        # b + W x = i pi/4 (1 - sum_i x_i), x_i in \{+1,-1\}
-        #   -> even x: b + W x = i(k+1) pi /2 ->  cosh(b + W x)= +-1
-        #   -> odd x: b + W x = i k pi /2 -> cosh(b + W x)= 0
-        W = W.at[:, 0].set(-1j * (np.pi / 4))
-        b = b.at[0].set(1j * (np.pi / 4) * n)
-        # Repeat to get rid of sign since now
-        # psi(x) =  cosh(b_0 + sum_i W_0i x) * cosh(b_1 + sum_i W_1i x)
-        #   -> even x: 1
-        #   -> odd x: 0
-        W = W.at[:, 1].set(-1j * (np.pi / 4))
-        b = b.at[1].set(1j * (np.pi / 4) * n)
-        # Unit 3 left as zero (neutral)
-        pars["Dense"]["kernel"] = W
-        pars["Dense"]["bias"] = (
-            b + (1 + 1j) * jax.random.uniform(jax.random.key(100), b.shape) * 1e-4
-        )
-        pars["visible_bias"] = (
-            jnp.zeros_like(pars["visible_bias"])
-            + (1 + 1j) * jax.random.uniform(jax.random.key(100), a.shape) * N * 1e-4
-        )
-
-        # visible_bias stays zero
-        vstate.parameters = pars
         return vstate
 
     vstate = get_vstate(2**10)
@@ -102,7 +70,8 @@ def main(N, n_samples_tvmc, driver_type, q):
     graph = nk.graph.Chain(N, pbc=True)
     # hamiltonian = sum([sigmax(hilbert, i) for i in graph.nodes()])
     # hamiltonian += sum([sigmaz(hilbert, i) @ sigmaz(hilbert, j) for i, j in graph.edges()])
-    hamiltonian = nk.operator.IsingJax(hilbert=hilbert, graph=graph, h=-1.0, J=1.0)
+    h = 1.
+    hamiltonian = nk.operator.IsingJax(hilbert=hilbert, graph=graph, h=-h, J=1.0)
 
     print(vstate.expect(sigma_z))
     fields_to_track = (
@@ -129,7 +98,6 @@ def main(N, n_samples_tvmc, driver_type, q):
 
     def measure_parity(step, log, driver):
         log["parity"] = driver.state.expect(sigma_z)
-        print(log["parity"])
         return True
 
     T = 2.0
@@ -142,7 +110,7 @@ def main(N, n_samples_tvmc, driver_type, q):
         raise NotImplementedError
     # Make sure we always start with the same state in notebook
 
-    save_path = f"./data/TFIM_{N}_{alpha}_parity/{exp_name}/"
+    save_path = f"./data/TFIM_PFAFF_{N}_{alpha}_parity/{exp_name}/"
 
     logger = Logger(path=save_path, fields=fields_to_track)
     if logger.restore():
@@ -159,16 +127,6 @@ def main(N, n_samples_tvmc, driver_type, q):
         os.makedirs(save_path)
 
     vstate = get_vstate(n_samples_tvmc)
-    if 1 and driver_type == "vanilla":
-        with open(
-            f"./data/TFIM_{N}_{alpha}_parity/bridge_{2**12}_{0.5:1.2f}/"
-            + f"log_params_1.mpack",
-            "rb",
-        ) as infile:
-            binary_data = infile.read()
-            vstate.variables = serialization.from_bytes(vstate.variables, binary_data)
-            vstate.variables = jax.tree.map(lambda x: jnp.array(x), vstate.variables)
-        t0 = 0.05
     # Thermalize
     for i in range(1):
         vstate.sample()
@@ -177,7 +135,7 @@ def main(N, n_samples_tvmc, driver_type, q):
     callbacks.append(measure_parity)
     acceptance_rate_callback = get_acceptance_rate_callback()
     callbacks.append(acceptance_rate_callback)
-    if driver_type == "bridge":
+    if driver_type=="bridge":
         tdvp_monitor_callback = get_umbrella_monitor_callback(save_times, save_path)
     elif driver_type == "vanilla":
         tdvp_monitor_callback = get_tdvp_monitor_callback(save_times, save_path)

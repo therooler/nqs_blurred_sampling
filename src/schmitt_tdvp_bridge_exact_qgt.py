@@ -23,7 +23,10 @@ import numpy as np
 import jax.scipy as jsp
 from netket import stats
 from netket.operator import AbstractOperator, DiscreteJaxOperator
-from netket.optimizer.qgt.qgt_jacobian import QGTJacobian_DefaultConstructor
+from netket.optimizer.qgt.qgt_jacobian import (
+    QGTJacobian_DefaultConstructor,
+    QGTJacobianDense,
+)
 from netket.optimizer.qgt.qgt_jacobian_dense import convert_tree_to_dense_format
 from netket.utils.api_utils import partial_from_kwargs
 from netket.vqs import VariationalState, VariationalMixedState, MCState
@@ -31,6 +34,7 @@ from netket.jax import tree_cast
 from netket.utils import timing, mpi, HashablePartial
 from netket.utils.types import Sequence, PyTree, Array
 import netket.jax as nkjax
+import netket as nk
 
 from netket.experimental.driver.tdvp_common import TDVPBaseDriver, odefun
 from netket.experimental.dynamics._solver import AbstractSolver
@@ -38,7 +42,7 @@ from netket.experimental.dynamics._solver import AbstractSolver
 from tdvp_utils import make_monitor_dict, bridge_sample, ess_from_weights
 
 
-class TDVPSchmittBridge(TDVPBaseDriver):
+class TDVPSchmittBridgeExactQGT(TDVPBaseDriver):
     r"""
     Variational time evolution based on the time-dependent variational principle which,
     when used with Monte Carlo sampling via :class:`netket.vqs.MCState`, is the time-dependent VMC
@@ -121,8 +125,7 @@ class TDVPSchmittBridge(TDVPBaseDriver):
         error_norm: str | Callable = "qgt",
         rcond: float = 1e-14,
         rcond_smooth: float = 1e-8,
-        snr_atol: float | None,
-        sampling_state: VariationalState,
+        snr_atol: float = 1,
     ):
         r"""
         Initializes the time evolution driver.
@@ -186,36 +189,17 @@ class TDVPSchmittBridge(TDVPBaseDriver):
         self.diag_shift = diag_shift
         self.holomorphic = holomorphic
         self.diag_scale = diag_scale
+        self.state_exact = nk.vqs.FullSumState(
+            hilbert=variational_state.hilbert,
+            model=variational_state.model,
+            variables=variational_state.variables,
+        )
+        self.state_exact.parameters = variational_state.parameters.copy()
 
         self._monitor = {}
 
-        if not (0 < q < 1):
-            raise ValueError(f"`q` must satisfy 0 < q < 1, received {q}")
+        assert 0 < q < 1, f"`q` must satisfy 0 < q < 1, received {q}"
         self.q = q
-
-        if sampling_state is not None:
-            if not isinstance(sampling_state, VariationalState):
-                raise ValueError(
-                    f"Expected `sampling_state` to be a VariationalState, received {type(sampling_state)}"
-                )
-            # Check that sampling_state and variational_state have the same parameter structure
-            sampling_structure = jax.tree_util.tree_structure(sampling_state.parameters)
-            variational_structure = jax.tree_util.tree_structure(
-                variational_state.parameters
-            )
-            if sampling_structure != variational_structure:
-                raise ValueError(
-                    f"Parameter structures of sampling_state and variational_state do not match. "
-                    f"sampling_state structure: {sampling_structure}, "
-                    f"variational_state structure: {variational_structure}"
-                )
-            # Store the dtype of sampling_state parameters
-            sampling_leaves = jax.tree_util.tree_leaves(sampling_state.parameters)
-            self.sampling_dtype = sampling_leaves[0].dtype
-            self.sampling_state = sampling_state
-        else:
-            self.sampling_state = None
-            self.sampling_dtype = None
 
         super().__init__(
             operator, variational_state, integrator, t0=t0, error_norm=error_norm
@@ -286,12 +270,13 @@ class TDVPSchmittBridge(TDVPBaseDriver):
 
 
 @timing.timed
-@partial(jax.jit, static_argnames=("n_samples", " rcond", "rcond_smooth", "snr_atol"))
+@partial(jax.jit, static_argnames=("n_samples"))
 def _impl(
     parameters,
     n_samples,
     E_loc,
     S,
+    S_exact,
     importance_weights,
     rhs_coeff,
     rcond,
@@ -310,7 +295,7 @@ def _impl(
     O = O * jnp.sqrt(
         importance_weights / importance_weights.shape[0]
     )  # Undo PDF since it's already in ΔE_loc
-    Sd = S.to_dense()
+    Sd = S_exact.to_dense()
     ev, V = jnp.linalg.eigh(Sd)
     OEdata = O.conj() * ΔE_loc
     # SNR of the force estimator F = sum_i O_i^* ΔE_i
@@ -327,30 +312,14 @@ def _impl(
     # implement as `rho = mpi.mean(QEdata, axis=0)`. However, this is different from
     # changing the basis AFTER averaging over the samples, and leads to the wrong
     # normalisation of RHo.
-    Q = jnp.tensordot(V.conj().T, O.T, axes=1).T
-    QEdata = Q.conj() * ΔE_loc
     rho = V.conj().T @ F
-
-    # Compute the SNR according to Eq. 21 but taking care of where sigma_k is zero
-    sigma_k = jnp.maximum(jnp.sqrt(stats.var(QEdata, axis=0)), rcond)
-    # Here we are hardcoding the case where rho==0 and sigma_k==0 to have infinite snr.
-    # This is an arbitrary choice, but avoids generating NaNs in the snr calculation.
-    # See netket#1959 and #1960 for more details.
-    snr = jnp.where(
-        sigma_k <= eps,
-        jnp.inf,
-        jnp.abs(rho) * jnp.sqrt(n_samples) / sigma_k,
-    )
 
     # Discard eigenvalues below numerical precision
     ev_inv = jnp.where(jnp.abs(ev / ev[-1]) > rcond, 1.0 / ev, 0.0)
     # Set regularizer for singular value cutoff
     regularizer = 1.0 / (1.0 + (rcond_smooth / jnp.abs(ev / ev[-1])) ** 6)
-    # Construct a soft cutoff based on the SNR
-    regularizer2 = regularizer * (1.0 / (1.0 + (snr_atol / snr) ** 6))
-
     # solve the linear system by hand
-    eta_p = ev_inv * regularizer2 * rhs_coeff * rho
+    eta_p = ev_inv * regularizer * rhs_coeff * rho
     # convert back to the parameter space
     update = V @ eta_p
 
@@ -363,32 +332,28 @@ def _impl(
     # If parameters are real, then take only real part of the gradient (if it's complex)
     dw = tree_cast(update_tree, parameters)
     ev_reg = jnp.where(
-        ev_inv * regularizer2 < 1.0 / rcond, 1.0 / (ev_inv * regularizer2), jnp.nan
+        ev_inv * regularizer < 1.0 / rcond, 1.0 / (ev_inv * regularizer), jnp.nan
     )
 
-    return E, dw, rmd, snr, snr_F, ev, ev_reg
+    return E, dw, rmd, jnp.array([jnp.nan]), snr_F, ev, ev_reg
 
 
 @odefun.dispatch
 def odefun_custom(
-    state: MCState, self: TDVPSchmittBridge, t, w, *, stage=0
+    state: MCState, self: TDVPSchmittBridgeExactQGT, t, w, *, stage=0
 ):  # noqa: F811
     # pylint: disable=protected-access
 
+    self.state_exact.parameters = w.copy()
+    self.state_exact.reset()
     state.parameters = w
     state.reset()
     chunk_size = getattr(state, "chunk_size", None)
 
     # Generator and schedules
     op_t = self.generator(t)
-    # Allow sampling in lower precision
-    if self.sampling_state is not None:
-        # Cast parameters to sampling_state dtype and assign
-        self.sampling_state.parameters = tree_cast(w, self.sampling_dtype)
-        self.sampling_state.reset()
-        samples = self.sampling_state.samples
-    else:
-        samples = self.state.samples
+    # Get samples
+    samples = self.state.samples
     # Bridge kernel
     state._sampler_seed, key = jax.random.split(state._sampler_seed, 2)
 
@@ -423,6 +388,15 @@ def odefun_custom(
         chunk_size=chunk_size,
     )
 
+    Sd = partial_from_kwargs(
+        QGTJacobianDense,
+        exclusive_arg_names=(("mode", "holomorphic")),
+    )(
+        self.state_exact,
+        diag_shift=5e-8,
+        diag_scale=self.diag_scale,
+        holomorphic=self.holomorphic,
+    )
     (
         self._loss_stats,
         self._dw,
@@ -436,6 +410,7 @@ def odefun_custom(
         state.n_samples,
         E_loc,
         self._S,
+        Sd,
         importance_weights,
         self._loss_grad_factor,
         self.rcond,
@@ -465,4 +440,5 @@ def ess_from_weights_var(w):
 
     s1_sq = jnp.mean(w, axis=0) ** 2
     s2 = jnp.mean(w**2, axis=0)
+    # jax.debug.print("w {} s1_sq {} s2 {}",w, s1_sq, s2 )
     return ((s1_sq / (s2 - s1_sq + jnp.finfo(w.dtype).eps))).squeeze()
