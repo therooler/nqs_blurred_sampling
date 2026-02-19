@@ -182,3 +182,102 @@ def bridge_sample(
         return nkjax.apply_chunked(
             vmapped_get_bridge_sample_and_weight, in_axes=0, chunk_size=64
         )((x, c))
+
+
+
+
+@partial(jax.jit, static_argnames=("apply_fn", "chunk_size"))
+def randomized_bridge_sample(
+    x: Array, key, params, q: float, flip_prob: float, apply_fn, op: AbstractOperator, chunk_size
+):
+    """One-step "bridge" proposal with importance weights.
+
+    For each input configuration ``x[i]``, this kernel constructs a simple mixture proposal:
+
+    - randomly generate a flip mask with bournolli distribution flip_prob;
+    - with probability ``q`` it keeps the configuration unchanged;
+    - with probability ``1-q`` it flip the spin using the flip mask. 
+
+    The returned scalar weight ``w_bridge`` corrects expectations from this mixture proposal to
+    the target density :math:`p(\sigma) \propto |\psi(\sigma)|^2` (computed from
+    ``apply_fn({'params': params}, ·).real``).
+
+    Parameters
+    ----------
+    x:
+        Array of shape ``(batch, n_dof)`` (or generally ``(batch, ...)``) containing the input
+        configurations.
+    key:
+        JAX PRNGKey.
+    params:
+        Parameters passed to ``apply_fn``.
+    q:
+        Mixture parameter in ``[0, 1]`` controlling the probability of *staying* at the current
+        configuration.
+    apply_fn:
+        Callable such that ``apply_fn({'params': params}, x)`` returns ``log(psi(x))`` (possibly
+        complex). Only the real part is used to form :math:`|\psi|^2`.
+    op:
+        Operator providing ``get_conn_padded`` returning connected configurations and matrix
+        elements.
+    chunk_size:
+        If not ``None``, evaluates the per-sample function with ``nkjax.apply_chunked``.
+
+    Returns
+    -------
+    x_p:
+        Array with the same shape as ``x`` containing the proposed (or unchanged) configurations.
+    w_bridge:
+        Array of shape ``(batch,)`` with importance weights
+        :math:`w = p_{\mathrm{target}}(x_p) / p_{\mathrm{mix}}(x_p)`, where
+        :math:`p_{\mathrm{target}}(\sigma) \propto |\psi(\sigma)|^2` and
+        :math:`p_{\mathrm{mix}}(\sigma) = q\,p_{\mathrm{target}}(\sigma) + (1-q)\,\frac{1}{n}\sum_j p_{\mathrm{target}}(\sigma_j)`.
+    E_loc:
+        Local energy estimate for each proposed configuration ``x_p[i]``.
+    """
+    batch_size = x.shape[0]
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+    c = jax.random.uniform(subkey1, shape=(batch_size, 1))
+    keys = jax.random.split(subkey2, batch_size)
+
+    def get_bridge_sample_and_Eloc(_in):
+        _x, rng, key = _in
+        u1 = rng
+        _x_shape = _x.shape
+        _x = _x.reshape(-1)
+        flip = 1 - 2*jax.random.bernoulli(key, flip_prob, _x.shape)
+        proposed = _x * flip
+
+        # choose a whether to flip or stay
+        x_p = jnp.where(u1 > q, _x, proposed)  # equivalent to u1 < 1-q
+        
+        # log |psi| for the blurred sample and its flipped configuration
+        logpsi_stay = apply_fn({"params": params}, x_p)
+        logpsi_flip = apply_fn({"params": params}, x_p * flip)
+        logp_stay = 2.0 * logpsi_stay.real
+        logp_flip = 2.0 * logpsi_flip.real 
+
+        # stable mixture weight: (1-q)*p(stay) + (q/n)*sum_j p(all_flipped_j)
+        log_term_main = jnp.log1p(-q) + logp_stay
+        log_term_flips = jnp.log(q) + logp_flip
+        log_w_bridge = jsp.special.logsumexp(jnp.stack([log_term_main, log_term_flips]))
+        w_bridge = jnp.exp(logp_stay - log_w_bridge)  # scalar
+
+        # calculate local energy
+        x_p_conn, mels = op.get_conn_padded(x_p)
+        logpsi_all = apply_fn({"params": params}, x_p_conn)
+        # Calculate local energies
+        E_loc = jnp.sum(
+            mels * jnp.exp(logpsi_all - jnp.expand_dims(logpsi_stay, -1)), axis=-1
+        )
+        return x_p.reshape(_x_shape), w_bridge, jnp.atleast_1d(E_loc)
+
+    vmapped_get_bridge_sample_and_weight = jax.vmap(
+        get_bridge_sample_and_Eloc, in_axes=0
+    )
+    if chunk_size is None:
+        return vmapped_get_bridge_sample_and_weight((x, c, keys))
+    else:
+        return nkjax.apply_chunked(
+            vmapped_get_bridge_sample_and_weight, in_axes=0, chunk_size=64
+        )((x, c, keys))
