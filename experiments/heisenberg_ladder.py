@@ -26,6 +26,7 @@ from functools import partial
 from flax import serialization
 from schmitt_tdvp_bridge import TDVPSchmittBridge
 from schmitt_tdvp import TDVPSchmitt
+from schmitt_tdvp_randomized_bridge import TDVPSchmittRandomizedBridge
 import argparse
 
 
@@ -56,7 +57,8 @@ def main(q):
         sampler = nk.sampler.MetropolisExchange(
             hilbert, graph=graph, n_chains=n_samples
         )
-        model = nk.models.RBM(alpha=10, param_dtype=complex)
+        # model = nk.models.RBM(alpha=10, param_dtype=complex)
+        model = nk.models.RBMSymm(symmetries=graph.point_group(), alpha=10, param_dtype=complex)
         return nk.vqs.MCState(
             sampler=sampler,
             model=model,
@@ -210,6 +212,18 @@ def main(q):
             snr_atol=2,
             rcond=1e-14,
             rcond_smooth=1e-10,
+            **tvmc_kwargs,
+        )
+        TDVPSchmittRandomizedBridge(
+        hamiltonian,
+        vstate,
+        integrator,
+        t0=0,
+        flip_prob=q,
+        holomorphic=False,
+        snr_atol=2,
+        rcond=1e-14,
+        rcond_smooth=1e-10,
             **tvmc_kwargs,
         )
     driver.run(
