@@ -85,9 +85,9 @@ def ess_from_weights_var(w):
     return ((s1_sq / (s2 - s1_sq + jnp.finfo(w.dtype).eps))).squeeze()
 
 
-@partial(jax.jit, static_argnames=("apply_fn", "chunk_size"))
+@partial(jax.jit, static_argnames=("apply_fn", "chunk_size", "diagonal_mels"))
 def bridge_sample(
-    x: Array, key, params, q: float, apply_fn, op: AbstractOperator, chunk_size
+    x: Array, key, params, q: float, apply_fn, op: AbstractOperator, chunk_size, diagonal_mels:bool=True,
 ):
     """One-step "bridge" proposal with importance weights.
 
@@ -137,42 +137,75 @@ def bridge_sample(
     batch_size = x.shape[0]
     # rng for u1, u2 per configuration
     c = jax.random.uniform(key, shape=(batch_size, 2))
-
-    def get_bridge_sample_and_Eloc(_in):
-        _x, rng = _in
-        u1, u2 = rng
-        _x_shape = _x.shape
-        _x = _x.reshape(-1)
-        # Connected elements of Hamiltonian
-        x_conn, _ = op.get_conn_padded(_x)
-        # NOTE: get_conn_padded(_x) can contain diagonal elements, which correspond to "stay" configuration
-        # For Ising, the first element will be diagonal, we therefore only have nconn-1 off-diagonal elements
-        n_conn = x_conn.shape[-1] - 1
-        idx = jnp.floor(u2 * n_conn).astype(jnp.int32)
-        # Only choose from off-diagonal elements
-        proposed = x_conn[idx + 1]
-        # choose a whether to flip or stay
-        x_p = jnp.where(u1 > q, _x, proposed)  # equivalent to u1 < 1-q
-        x_p_conn, mels = op.get_conn_padded(x_p)
-        # log |psi| for flipped and all neighbors
-        logpsi_stay = apply_fn({"params": params}, x_p)
-        logpsi_all = apply_fn({"params": params}, x_p_conn)
-        # target density ∝ |psi|^2
-        logp_stay = 2.0 * logpsi_stay.real
-        logp_all = 2.0 * logpsi_all.real  # (n,)
-        # stable mixture weight: (1-q)*p(stay) + (q/n)*sum_j p(all_flipped_j)
-        log_term_main = jnp.log1p(-q) + logp_stay
-        log_term_flips = (
-            jnp.log(q) - jnp.log(n_conn) + jsp.special.logsumexp(logp_all[1:])
-        )
-        log_w_bridge = jsp.special.logsumexp(jnp.stack([log_term_main, log_term_flips]))
-        w_bridge = jnp.exp(logp_stay - log_w_bridge)  # scalar
-        # Calculate local energies
-        E_loc = jnp.sum(
-            mels * jnp.exp(logpsi_all - jnp.expand_dims(logpsi_stay, -1)), axis=-1
-        )
-        return x_p.reshape(_x_shape), w_bridge, jnp.atleast_1d(E_loc)
-
+    if diagonal_mels:
+        def get_bridge_sample_and_Eloc(_in):
+            _x, rng = _in
+            u1, u2 = rng
+            _x_shape = _x.shape
+            _x = _x.reshape(-1)
+            # Connected elements of Hamiltonian
+            x_conn, _ = op.get_conn_padded(_x)
+            # NOTE: get_conn_padded(_x) can contain diagonal elements, which correspond to "stay" configuration
+            # For Ising, the first element will be diagonal, we therefore only have nconn-1 off-diagonal elements
+            n_conn = x_conn.shape[-2] - 1
+            idx = jnp.floor(u2 * n_conn).astype(jnp.int32)
+            # Only choose from off-diagonal elements
+            proposed = x_conn[idx + 1]
+            # choose a whether to flip or stay
+            x_p = jnp.where(u1 > q, _x, proposed)  # equivalent to u1 < 1-q
+            x_p_conn, mels = op.get_conn_padded(x_p)
+            # log |psi| for flipped and all neighbors
+            logpsi_stay = apply_fn({"params": params}, x_p)
+            logpsi_all = apply_fn({"params": params}, x_p_conn)
+            # target density ∝ |psi|^2
+            logp_stay = 2.0 * logpsi_stay.real
+            logp_all = 2.0 * logpsi_all.real  # (n,)
+            # stable mixture weight: (1-q)*p(stay) + (q/n)*sum_j p(all_flipped_j)
+            log_term_main = jnp.log1p(-q) + logp_stay
+            log_term_flips = (
+                jnp.log(q) - jnp.log(n_conn) + jsp.special.logsumexp(logp_all[1:])
+            )
+            log_w_bridge = jsp.special.logsumexp(jnp.stack([log_term_main, log_term_flips]))
+            w_bridge = jnp.exp(logp_stay - log_w_bridge)  # scalar
+            # Calculate local energies
+            E_loc = jnp.sum(
+                mels * jnp.exp(logpsi_all - jnp.expand_dims(logpsi_stay, -1)), axis=-1
+            )
+            return x_p.reshape(_x_shape), w_bridge, jnp.atleast_1d(E_loc)
+    else:
+        def get_bridge_sample_and_Eloc(_in):
+            _x, rng = _in
+            u1, u2 = rng
+            _x_shape = _x.shape
+            _x = _x.reshape(-1)
+            # Connected elements of Hamiltonian
+            x_conn, _ = op.get_conn_padded(_x)
+            # no diagonal elements
+            n_conn = x_conn.shape[-2]
+            idx = jnp.floor(u2 * n_conn).astype(jnp.int32)
+            # Only choose from off-diagonal elements
+            proposed = x_conn[idx]
+            # choose whether to flip or stay
+            x_p = jnp.where(u1 > q, _x, proposed)  # equivalent to u1 < 1-q
+            x_p_conn, mels = op.get_conn_padded(x_p)
+            # log |psi| for flipped and all neighbors
+            logpsi_stay = apply_fn({"params": params}, x_p)
+            logpsi_all = apply_fn({"params": params}, x_p_conn)
+            # target density ∝ |psi|^2
+            logp_stay = 2.0 * logpsi_stay.real
+            logp_all = 2.0 * logpsi_all.real  # (n,)
+            # stable mixture weight: (1-q)*p(stay) + (q/n)*sum_j p(all_flipped_j)
+            log_term_main = jnp.log1p(-q) + logp_stay
+            log_term_flips = (
+                jnp.log(q) - jnp.log(n_conn) + jsp.special.logsumexp(logp_all)
+            )
+            log_w_bridge = jsp.special.logsumexp(jnp.stack([log_term_main, log_term_flips]))
+            w_bridge = jnp.exp(logp_stay - log_w_bridge)  # scalar
+            # Calculate local energies
+            E_loc = jnp.sum(
+                mels * jnp.exp(logpsi_all - jnp.expand_dims(logpsi_stay, -1)), axis=-1
+            )
+            return x_p.reshape(_x_shape), w_bridge, jnp.atleast_1d(E_loc)
     vmapped_get_bridge_sample_and_weight = jax.vmap(
         get_bridge_sample_and_Eloc, in_axes=0
     )
@@ -180,5 +213,5 @@ def bridge_sample(
         return vmapped_get_bridge_sample_and_weight((x, c))
     else:
         return nkjax.apply_chunked(
-            vmapped_get_bridge_sample_and_weight, in_axes=0, chunk_size=64
+            vmapped_get_bridge_sample_and_weight, in_axes=0, chunk_size=chunk_size, axis_0_is_sharded=False
         )((x, c))

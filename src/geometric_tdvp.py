@@ -23,13 +23,14 @@ import numpy as np
 import jax.scipy as jsp
 from netket import stats
 from netket.operator import AbstractOperator, DiscreteJaxOperator
-from netket.optimizer.qgt.qgt_jacobian import QGTJacobian_DefaultConstructor
+from netket.optimizer.qgt.qgt_jacobian import QGTJacobianDenseT
 from netket.optimizer.qgt.qgt_jacobian_dense import convert_tree_to_dense_format
 from netket.utils.api_utils import partial_from_kwargs
 from netket.vqs import VariationalState, VariationalMixedState, MCState
 from netket.jax import tree_cast
 from netket.utils import timing, mpi, HashablePartial
 from netket.utils.types import Sequence, PyTree, Array
+from netket.optimizer.solver import pinv_smooth
 import netket.jax as nkjax
 
 from netket.experimental.driver.tdvp_common import TDVPBaseDriver, odefun
@@ -53,7 +54,7 @@ else:
     JAXMG_ENABLED = False
 
 
-class TDVPSchmittBridge(TDVPBaseDriver):
+class TDVPGeometric(TDVPBaseDriver):
     r"""
     Variational time evolution based on the time-dependent variational principle which,
     when used with Monte Carlo sampling via :class:`netket.vqs.MCState`, is the time-dependent VMC
@@ -139,7 +140,6 @@ class TDVPSchmittBridge(TDVPBaseDriver):
         snr_atol: float | None,
         sampling_state: VariationalState = None,
         distributed_eigh: bool = False,
-        diagonal_mels:bool=True,
     ):
         r"""
         Initializes the time evolution driver.
@@ -203,8 +203,6 @@ class TDVPSchmittBridge(TDVPBaseDriver):
         self.diag_shift = diag_shift
         self.holomorphic = holomorphic
         self.diag_scale = diag_scale
-
-        self._diagonal_mels = diagonal_mels
 
         self._monitor = {}
 
@@ -338,26 +336,21 @@ def _impl(
     ΔE_loc = E_loc.reshape(-1, 1) - E.mean
 
     stack_jacobian = S.mode == "complex"
-
     O = S.O
     if stack_jacobian:
-        O = O.reshape(-1, 2, S.O.shape[-1])
+        O = O.reshape(-1, 2, O.shape[-1])
         O = O[:, 0, :] + 1j * O[:, 1, :]
+    
+    qgt = S.to_dense()
+    # print(qgt.shape)
     O = O * jnp.sqrt(
         importance_weights / importance_weights.shape[0]
     )  # O is already multiplied with sqrt(pdf) so now O * sqrt(pdf)->O * pdf
-    Sd = S.to_dense()
-    if distributed_eigh:
-        Sd = jax.lax.with_sharding_constraint(Sd, P("S", None))
-        mesh = jax.sharding.get_abstract_mesh()
-        print("Using syevd")
-        ev, V = syevd(Sd, T_A=1024, mesh=mesh, in_specs=(P("S", None),))
-    else:
-
-        ev, V = jnp.linalg.eigh(Sd)
-
+    qgt = regularize(qgt, rcond, rcond_smooth)
+    g = 0.5 * (qgt + qgt.T)
+    omega = 0.5 * (qgt - qgt.T)
+    # Compute force vector
     OEdata = O.conj() * ΔE_loc
-    # SNR of the force estimator F = sum_i O_i^* ΔE_i
     OE_mean = stats.mean(OEdata, axis=0)
     OE_var = stats.var(OEdata, axis=0)
     eps = jnp.finfo(O.dtype).eps
@@ -367,54 +360,45 @@ def _impl(
         jnp.abs(OE_mean) * jnp.sqrt(n_samples) / jnp.sqrt(OE_var + eps),
     )
     F = stats.sum(OEdata, axis=0)
-    # eigenbasis
-    Q = jnp.tensordot(V.conj().T, O.T, axes=1).T
-    QEdata = Q.conj() * ΔE_loc
-    rho = V.conj().T @ F
 
-    # Compute the SNR according to Eq. 21 but taking care of where sigma_k is zero
-    sigma_k = jnp.maximum(jnp.sqrt(stats.var(QEdata, axis=0)), rcond)
-    # Here we are hardcoding the case where rho==0 and sigma_k==0 to have infinite snr.
-    # This is an arbitrary choice, but avoids generating NaNs in the snr calculation.
-    # See netket#1959 and #1960 for more details.
-    snr = jnp.where(
-        sigma_k <= eps,
-        jnp.inf,
-        jnp.abs(rho) * jnp.sqrt(n_samples) / sigma_k,
-    )
+    # Build block matrix A and vector B for the KKT system
+    n = g.shape[0]
 
-    # Discard eigenvalues below numerical precision
-    ev_inv = jnp.where(jnp.abs(ev / ev[-1]) > rcond, 1.0 / ev, 0.0)
-    # Set regularizer for singular value cutoff
-    regularizer = 1.0 / (1.0 + (rcond_smooth / jnp.abs(ev / ev[-1])) ** 6)
-    if snr_atol is not None:
-        # Construct a soft cutoff based on the SNR
-        regularizer = regularizer * (1.0 / (1.0 + (snr_atol / snr) ** 6))
+    A = jnp.block([[2 * g, omega.T], [omega, jnp.zeros_like(g)]])
+    B = jnp.concatenate([jnp.zeros(n, dtype=O.dtype), rhs_coeff * F])
 
-    # solve the linear system by hand
-    eta_p = ev_inv * regularizer * rhs_coeff * rho
-    # convert back to the parameter space
-    update = V @ eta_p
+    # Solve A x = -B using least squares (pseudo-inverse)
+    sol, residuals, rank, s = jnp.linalg.lstsq(A, -B, rcond=rcond)
+    update = sol[:n]
 
-    # remainder of the solution
-    rmd = jnp.linalg.norm(Sd.dot(update) - rhs_coeff * F) / jnp.linalg.norm(F)
-
-    y, reassemble = convert_tree_to_dense_format(parameters, S.mode)
+    # # remainder of the solution
+    rmd = jnp.linalg.norm(A @ sol + B) / (jnp.linalg.norm(B) + eps)
+    # update,_ = pinv_smooth(qgt, rhs_coeff * F)
+    # rmd = 1e-10
+    # Reassemble update into parameter tree
+    y, reassemble = convert_tree_to_dense_format(parameters, mode)
     update_tree = reassemble(update if jnp.iscomplexobj(y) else update.real)
-
-    # If parameters are real, then take only real part of the gradient (if it's complex)
     dw = tree_cast(update_tree, parameters)
-    ev_reg = jnp.where(
-        ev_inv * regularizer < 1.0 / rcond, 1.0 / (ev_inv * regularizer), jnp.nan
-    )
+
+    # For compatibility, fill snr, ev, ev_reg with dummy values
+    snr = jnp.zeros_like(F.real)
+    ev = jnp.zeros_like(F.real)
+    ev_reg = jnp.zeros_like(F.real)
 
     return E, dw, rmd, snr, snr_F, ev, ev_reg
 
 
+def regularize(A, rcond, rcond_smooth):
+    ev, V = jnp.linalg.eigh(A)
+    ev_cutoff = jnp.where(jnp.abs(ev / ev[-1]) > rcond, ev, 0.0)
+    # Set regularizer for singular value cutoff
+    regularizer = (1.0 + (rcond_smooth / jnp.abs(ev / ev[-1])) ** 6)
+    ev = ev_cutoff * regularizer
+    return V @ jnp.diag(ev) @ V.conj().T
+
+
 @odefun.dispatch
-def odefun_custom(
-    state: MCState, self: TDVPSchmittBridge, t, w, *, stage=0
-):  # noqa: F811
+def odefun_custom(state: MCState, self: TDVPGeometric, t, w, *, stage=0):  # noqa: F811
     # pylint: disable=protected-access
 
     state.parameters = w
@@ -440,7 +424,6 @@ def odefun_custom(
         op=op_t,
         q=self.q,
         chunk_size=chunk_size,
-        diagonal_mels=self._diagonal_mels
     )(samples, key, w)
     # Monitor ESS of the combined weights
     ess = ess_from_weights(importance_weights)
@@ -465,7 +448,6 @@ def odefun_custom(
         holomorphic=self.holomorphic,
         chunk_size=chunk_size,
     )
-
     (
         self._loss_stats,
         self._dw,
@@ -490,9 +472,72 @@ def odefun_custom(
         self._rmd, ess, self._snr, self._snr_F, self._ev, self._ev_reg
     )
     if stage == 0:
+        pars_struct = jax.tree_util.tree_map(
+            lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), state.parameters
+        )
         self._last_qgt = self._S
 
     return self._dw
+
+
+def prepare_jacobians(
+    apply_fun,
+    parameters,
+    model_state,
+    samples,
+    pdf=None,
+    *,
+    dense: bool,
+    mode: str | None = None,
+    holomorphic: bool | None = None,
+    chunk_size: int | None = None,
+):
+    if mode is not None and holomorphic is not None:
+        raise ValueError("Cannot specify both `mode` and `holomorphic`.")
+
+    if mode is None:
+        mode = nkjax.jacobian_default_mode(
+            apply_fun,
+            parameters,
+            model_state,
+            samples,
+            holomorphic=holomorphic,
+        )
+
+    if pdf is not None:
+        if not pdf.shape == samples.shape[:-1]:
+            raise ValueError(
+                "The shape of pdf must match the shape of the samples, "
+                f"instead you provided (pdf.shape={pdf.shape}) != "
+                f"(samples.shape={samples.shape[:-1]})"
+            )
+        if pdf.ndim >= 2:
+            pdf = jax.jit(jax.lax.collapse, static_argnums=(1, 2))(pdf, 0, 2)
+
+    if samples.ndim >= 3:
+        # use jit so that we can do it on global shared array
+        samples = jax.jit(jax.lax.collapse, static_argnums=(1, 2))(samples, 0, 2)
+
+    jac_mode = mode
+    if mode == "imag":
+        # Imaginary mode is a specificity of the QGT, but it requires the standard complex-mode
+        # jacobian to be computed.
+        jac_mode = "complex"
+
+    jacobians = nkjax.jacobian(
+        apply_fun,
+        parameters,
+        samples,
+        model_state,
+        mode=jac_mode,
+        pdf=pdf,
+        chunk_size=chunk_size,
+        dense=dense,
+        center=True,
+        _sqrt_rescale=True,
+    )
+
+    return jacobians, jac_mode
 
 
 @jax.jit

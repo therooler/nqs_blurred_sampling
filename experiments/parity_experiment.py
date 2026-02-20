@@ -27,6 +27,7 @@ from flax import serialization
 # from schmitt_tdvp_bridge_jaxmg import TDVPSchmittBridgeJAXMg as DynamicsDriver
 from schmitt_tdvp_bridge import TDVPSchmittBridge
 from schmitt_tdvp import TDVPSchmitt
+from geometric_tdvp import TDVPGeometric
 
 import argparse
 import numpy as np
@@ -138,6 +139,8 @@ def main(N, n_samples_tvmc, driver_type, q):
         exp_name = f"bridge_{n_samples_tvmc}_{q:1.2f}"
     elif driver_type == "vanilla":
         exp_name = f"vanilla_{n_samples_tvmc}"
+    elif driver_type == "geometric":
+        exp_name = f"geometric_{n_samples_tvmc}_{q:1.2f}"
     else:
         raise NotImplementedError
     # Make sure we always start with the same state in notebook
@@ -172,12 +175,12 @@ def main(N, n_samples_tvmc, driver_type, q):
     # Thermalize
     for i in range(1):
         vstate.sample()
-
+    print(vstate.n_parameters)
     callbacks = []
     callbacks.append(measure_parity)
     acceptance_rate_callback = get_acceptance_rate_callback()
     callbacks.append(acceptance_rate_callback)
-    if driver_type == "bridge":
+    if driver_type in ["bridge", "geometric"]:
         tdvp_monitor_callback = get_umbrella_monitor_callback(save_times, save_path)
     elif driver_type == "vanilla":
         tdvp_monitor_callback = get_tdvp_monitor_callback(save_times, save_path)
@@ -202,6 +205,17 @@ def main(N, n_samples_tvmc, driver_type, q):
         )
     elif driver_type == "vanilla":
         dynamics = TDVPSchmitt(
+            hamiltonian,
+            vstate,
+            integrator,
+            t0=t0,
+            snr_atol=2,
+            rcond=1e-14,
+            rcond_smooth=1e-10,
+            **tvmc_kwargs,
+        )
+    elif driver_type == "geometric":
+        dynamics = TDVPGeometric(
             hamiltonian,
             vstate,
             integrator,

@@ -17,9 +17,9 @@ echo "[INFO] Preparing to generate task list"
 for N in "${Ns[@]}"; do
   for P in "${Ps[@]}"; do
     for Q in "${Qs[@]}"; do
-        OUTF="outputs/hadamard_vanilla.N${N}_P${P}_Q${Q}.out"
+        OUTF="outputs/pfaffian.N${N}_P${P}_Q${Q}.out"
         echo "[INFO] Adding task -> N=${N}, P=${P}, Q=${Q} -> logging to ${OUTF}"
-        cmd="export ENABLE_JAXMG=1 && source ~/blurred_sampling/.venv/bin/activate && python -u parity_experiment_pfaffian.py --N=$N --power=$P --q=$Q --driver_type=bridge --h=0.125&> ${OUTF}"
+        cmd="export ENABLE_JAXMG=1 && source ~/blurred_sampling/.venv/bin/activate && python -u parity_experiment_pfaffian.py --N=$N --power=$P --q=$Q --driver_type=vanilla --h=0.125&> ${OUTF}"
         echo "$cmd" >> "${TASKS}"
     done
   done

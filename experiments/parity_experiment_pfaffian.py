@@ -29,6 +29,7 @@ from schmitt_tdvp import TDVPSchmitt
 
 import argparse
 import numpy as np
+from flax import serialization
 
 from gaussian_state import GaussianState
 
@@ -141,6 +142,16 @@ def main(N, n_samples_tvmc, driver_type, q, h, chunk_size):
 
     vstate, vstate_sampling = get_vstates(n_samples_tvmc, jnp.float32)
     print(f"Number of parameters: {vstate.n_parameters}")
+    if 1 and driver_type == "vanilla":
+        with open(
+            f"./data/TFIM_PFAFF_{N}_parity/bridge_{2**13}_{0.5:1.2f}/"
+            + f"log_params_1.mpack",
+            "rb",
+        ) as infile:
+            binary_data = infile.read()
+            vstate.variables = serialization.from_bytes(vstate.variables, binary_data)
+            vstate.variables = jax.tree.map(lambda x: jnp.array(x), vstate.variables)
+        t0 = 0.05
     # Thermalize
     for i in range(1):
         vstate.sample()
