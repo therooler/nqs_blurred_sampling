@@ -197,35 +197,35 @@ def main(q):
             t0=t0,
             holomorphic=False,
             snr_atol=2,
-            rcond=1e-14,
+            rcond=1e-9,
             rcond_smooth=1e-10,
             **tvmc_kwargs,
         )
     else:
-        # driver = TDVPSchmittBridge(
-        #     quench_hamiltonian,
-        #     vstate,
-        #     integrator,
-        #     t0=t0,
-        #     q=q,
-        #     holomorphic=False,
-        #     snr_atol=2,
-        #     rcond=1e-14,
-        #     rcond_smooth=1e-10,
-        #     **tvmc_kwargs,
-        # )
-        driver = TDVPSchmittRandomizedBridge(
-            hamiltonian,
+        driver = TDVPSchmittBridge(
+            quench_hamiltonian,
             vstate,
             integrator,
-            t0=0,
-            flip_prob=q,
+            t0=t0,
+            q=q,
             holomorphic=False,
             snr_atol=2,
-            rcond=1e-7,
+            rcond=1e-9,
             rcond_smooth=1e-10,
             **tvmc_kwargs,
         )
+        # driver = TDVPSchmittRandomizedBridge(
+        #     hamiltonian,
+        #     vstate,
+        #     integrator,
+        #     t0=0,
+        #     flip_prob=q,
+        #     holomorphic=False,
+        #     snr_atol=2,
+        #     rcond=1e-7,
+        #     rcond_smooth=1e-10,
+        #     **tvmc_kwargs,
+        # )
     driver.run(
         T - t0,
         out=logger,
