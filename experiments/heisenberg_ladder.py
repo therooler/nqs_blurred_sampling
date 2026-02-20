@@ -1,5 +1,3 @@
-
-
 import os
 import matplotlib.pyplot as plt
 from matplotlib import colors
@@ -58,7 +56,9 @@ def main(q):
             hilbert, graph=graph, n_chains=n_samples
         )
         # model = nk.models.RBM(alpha=10, param_dtype=complex)
-        model = nk.models.RBMSymm(symmetries=graph.point_group(), alpha=10, param_dtype=complex)
+        model = nk.models.RBMSymm(
+            symmetries=graph.point_group(), alpha=10, param_dtype=complex
+        )
         return nk.vqs.MCState(
             sampler=sampler,
             model=model,
@@ -202,28 +202,28 @@ def main(q):
             **tvmc_kwargs,
         )
     else:
-        driver = TDVPSchmittBridge(
-            quench_hamiltonian,
+        # driver = TDVPSchmittBridge(
+        #     quench_hamiltonian,
+        #     vstate,
+        #     integrator,
+        #     t0=t0,
+        #     q=q,
+        #     holomorphic=False,
+        #     snr_atol=2,
+        #     rcond=1e-14,
+        #     rcond_smooth=1e-10,
+        #     **tvmc_kwargs,
+        # )
+        driver = TDVPSchmittRandomizedBridge(
+            hamiltonian,
             vstate,
             integrator,
-            t0=t0,
-            q=q,
+            t0=0,
+            flip_prob=q,
             holomorphic=False,
             snr_atol=2,
-            rcond=1e-14,
+            rcond=1e-7,
             rcond_smooth=1e-10,
-            **tvmc_kwargs,
-        )
-        TDVPSchmittRandomizedBridge(
-        hamiltonian,
-        vstate,
-        integrator,
-        t0=0,
-        flip_prob=q,
-        holomorphic=False,
-        snr_atol=2,
-        rcond=1e-14,
-        rcond_smooth=1e-10,
             **tvmc_kwargs,
         )
     driver.run(
