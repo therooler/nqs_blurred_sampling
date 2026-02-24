@@ -1,6 +1,4 @@
 import os
-import matplotlib.pyplot as plt
-from matplotlib import colors
 
 import sys
 
@@ -26,18 +24,24 @@ from schmitt_tdvp_bridge import TDVPSchmittBridge
 from schmitt_tdvp import TDVPSchmitt
 from schmitt_tdvp_randomized_bridge import TDVPSchmittRandomizedBridge
 import argparse
+from schmitt_tdvp_randomized_permutation_bridge import (
+    TDVPSchmittRandomizedPermutationBridge,
+)
 
 
-def main(q):
+def main(q1, q2, rcond):
 
     Lx = 8
     Ly = 2
+    A_p = 0.10
+    time_step = 2e-3
+
     N = Lx * Ly
-    A_p = 0.15
+    discard = 50  # thermalization
 
     hilbert = nk.hilbert.Spin(s=1 / 2, N=N, total_sz=0)
-
     graph = nk.graph.Grid((Lx, Ly), pbc=(True, False))
+    graph_pbc = nk.graph.Grid((Lx, Ly), pbc=(True, True))
     hamiltonian = nk.operator.Heisenberg(hilbert, graph, J=1.0, sign_rule=True)
 
     def pulse(t, A_p, omega_p, sigma_p, t_p):
@@ -47,17 +51,16 @@ def main(q):
 
     pulse_partial = partial(pulse, A_p=A_p, omega_p=8.0, sigma_p=0.4, t_p=0.987)
 
-    t = jnp.linspace(0, 4, 100)
-    plt.plot(t, partial(pulse, A_p=0.20, omega_p=8.0, sigma_p=0.4, t_p=0.987)(t))
-    plt.show()
-
     def get_vstate(n_samples):
         sampler = nk.sampler.MetropolisExchange(
             hilbert, graph=graph, n_chains=n_samples
         )
-        # model = nk.models.RBM(alpha=10, param_dtype=complex)
+        # use the pbc graph translation_group for the rbm symmetry: x-translation + y reflection.
         model = nk.models.RBMSymm(
-            symmetries=graph.point_group(), alpha=10, param_dtype=complex
+            symmetries=graph_pbc.translation_group(),
+            alpha=10,
+            param_dtype=complex,
+            use_visible_bias=False,
         )
         return nk.vqs.MCState(
             sampler=sampler,
@@ -115,13 +118,13 @@ def main(q):
             j = y * Lx + (x + 1)
             x_bonds.append((i, j))
     x_bonds_graph = nk.graph.Graph(edges=x_bonds)
-    H = graph.to_networkx()
-    G = x_bonds_graph.to_networkx()
-    import networkx as nx
+    # H = graph.to_networkx()
+    # G = x_bonds_graph.to_networkx()
+    # import networkx as nx
 
-    fig, (axs0, axs1) = plt.subplots(1, 2)
-    nx.draw(G, node_color="orange", ax=axs0, with_labels=True)
-    nx.draw(H, ax=axs1, with_labels=True)
+    # fig, (axs0, axs1) = plt.subplots(1, 2)
+    # nx.draw(G, node_color="orange", ax=axs0, with_labels=True)
+    # nx.draw(H, ax=axs1, with_labels=True)
     heisenberg_x = nk.operator.Heisenberg(hilbert, x_bonds_graph, J=1.0)
     quench_hamiltonian = lambda t: hamiltonian + pulse_partial(t) * heisenberg_x
     s_correlator = nk.operator.Heisenberg(hilbert, x_bonds_graph, J=1.0 / N)
@@ -152,9 +155,9 @@ def main(q):
         return True
 
     T = 10
-    n_samples_tvmc = 2**13
+    n_samples_tvmc = 7000
     save_times = np.linspace(0.0, T, 20)
-    exp_name = f"bridge_{n_samples_tvmc}_Ap_{A_p:1.2f}_q_{q:1.2f}"
+    exp_name = f"bridge_{n_samples_tvmc}_Ap_{A_p:1.2f}_q1_{q1:1.2f}_q2_{q2:1.2f}_rcond_{rcond:1.1e}_discard_{discard}"
     # Make sure we always start with the same state in notebook
 
     save_path = f"./data/HEISENBERG_LADDER_{Lx}_{Ly}/{exp_name}/"
@@ -171,16 +174,16 @@ def main(q):
             logger.restore_state(vstate)
     else:
         t0 = 0.0
-        dt = 1e-3
+        dt = time_step
         vstate.parameters = parameters.copy()
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-    for i in range(100):
+    for i in range(4000):
         vstate.sample()
     callbacks = []
     callbacks.append(measure_corr)
-    if q == 0:
+    if np.abs(q1 + q2) < 1e-12:
         tdvp_monitor_callback = get_tdvp_monitor_callback(save_times, save_path)
     else:
         tdvp_monitor_callback = get_umbrella_monitor_callback(save_times, save_path)
@@ -189,43 +192,32 @@ def main(q):
     # integrator = RK45(dt, adaptive=False, rtol=1e-6, dt_limits=(1e-5, 1e-2))
     integrator = Heun(dt)
     tvmc_kwargs = {}
-    if q == 0:
+    if np.abs(q1 + q2) < 1e-12:
         driver = TDVPSchmitt(
             quench_hamiltonian,
             vstate,
             integrator,
             t0=t0,
-            holomorphic=False,
-            snr_atol=2,
-            rcond=1e-9,
-            rcond_smooth=1e-10,
+            holomorphic=True,
+            snr_atol=0,
+            rcond=rcond,
+            rcond_smooth=0,
             **tvmc_kwargs,
         )
     else:
-        driver = TDVPSchmittBridge(
+        driver = TDVPSchmittRandomizedPermutationBridge(
             quench_hamiltonian,
             vstate,
             integrator,
             t0=t0,
-            q=q,
-            holomorphic=False,
-            snr_atol=2,
-            rcond=1e-9,
-            rcond_smooth=1e-10,
+            q_hamiltonian=q1,
+            q_permutation=q2,
+            holomorphic=True,
+            snr_atol=0,
+            rcond=rcond,
+            rcond_smooth=0,
             **tvmc_kwargs,
         )
-        # driver = TDVPSchmittRandomizedBridge(
-        #     hamiltonian,
-        #     vstate,
-        #     integrator,
-        #     t0=0,
-        #     flip_prob=q,
-        #     holomorphic=False,
-        #     snr_atol=2,
-        #     rcond=1e-7,
-        #     rcond_smooth=1e-10,
-        #     **tvmc_kwargs,
-        # )
     driver.run(
         T - t0,
         out=logger,
@@ -233,13 +225,13 @@ def main(q):
         show_progress=True,
         timeit=True,
     )
-
     logger.flush(vstate, done=True)
-    # fit_bridge(0.0, 2**12)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--q", default=0.5, type=float)
+    parser.add_argument("--q1", default=0.2, type=float)
+    parser.add_argument("--q2", default=0.6, type=float)
+    parser.add_argument("--rcond", default=1e-8, type=float)
     args = parser.parse_args()
-    main(float(args.q))
+    main(float(args.q1), float(args.q2), float(args.rcond))

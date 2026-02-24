@@ -312,3 +312,126 @@ def randomized_bridge_sample(
         return nkjax.apply_chunked(
             vmapped_get_bridge_sample_and_weight, in_axes=0, chunk_size=64
         )((x, c, keys))
+    
+
+@partial(jax.jit, static_argnames=("apply_fn", "chunk_size"))
+def randomized_permutation_bridge_sample(
+    x: Array, key, params, q_hamiltonian: float, q_permutation: float, apply_fn, op: AbstractOperator, chunk_size
+):
+    """One-step "bridge" proposal with importance weights.
+
+    For each input configuration ``x[i]``, this kernel constructs a simple mixture proposal:
+
+    - randomly generate a permutation of the spin "perm";
+    - with probability ``q_hamiltonian`` it proposes a random connected configuration by the Hamiltonian;
+    - with probability ``q_permutation`` it apply this perm to the spins;
+    - with probability ``1-q_hamiltonian-q_permutation`` it keeps the configuration unchanged;
+
+    The returned scalar weight ``w_bridge`` corrects expectations from this mixture proposal to
+    the target density :math:`p(\sigma) \propto |\psi(\sigma)|^2` (computed from
+    ``apply_fn({'params': params}, ·).real``).
+
+    Parameters
+    ----------
+    x:
+        Array of shape ``(batch, n_dof)`` (or generally ``(batch, ...)``) containing the input
+        configurations.
+    key:
+        JAX PRNGKey.
+    params:
+        Parameters passed to ``apply_fn``.
+    q_hamiltonian:
+        Mixture parameter in ``[0, 1]`` controlling the probability of proposing a random connected configuration by the Hamiltonian.
+    q_permutation:
+        Mixture parameter in ``[0, 1]`` controlling the probability of applying a random permutation to the spins.
+    apply_fn:
+        Callable such that ``apply_fn({'params': params}, x)`` returns ``log(psi(x))`` (possibly
+        complex). Only the real part is used to form :math:`|\psi|^2`.
+    op:
+        Operator providing ``get_conn_padded`` returning connected configurations and matrix
+        elements.
+    chunk_size:
+        If not ``None``, evaluates the per-sample function with ``nkjax.apply_chunked``.
+
+    Returns
+    -------
+    x_p:
+        Array with the same shape as ``x`` containing the proposed (or unchanged) configurations.
+    w_bridge:
+        Array of shape ``(batch,)`` with importance weights
+        :math:`w = p_{\mathrm{target}}(x_p) / p_{\mathrm{mix}}(x_p)`, where
+        :math:`p_{\mathrm{target}}(\sigma) \propto |\psi(\sigma)|^2` and
+        :math:`p_{\mathrm{mix}}(\sigma) = q\,p_{\mathrm{target}}(\sigma) + (1-q)\,\frac{1}{n}\sum_j p_{\mathrm{target}}(\sigma_j)`.
+    E_loc:
+        Local energy estimate for each proposed configuration ``x_p[i]``.
+    """
+    batch_size = x.shape[0]
+    key, subkey1, subkey2 = jax.random.split(key, 3)
+    c = jax.random.uniform(subkey1, shape=(batch_size, 3))
+    keys = jax.random.split(subkey2, batch_size)
+
+    def get_bridge_sample_and_Eloc(_in):
+        _x, rng, key = _in
+        u1, u2, u3 = rng
+        _x_shape = _x.shape
+        _x = _x.reshape(-1)
+
+        # sample a random configuration from connected sets
+        x_conn, _ = op.get_conn_padded(_x)
+        n_conn = x_conn.shape[-2] - 1
+        idx = jnp.floor(u2 * n_conn).astype(jnp.int32)
+
+        # generate a random permutation of the spins
+        def shuffle(key, x):
+            flat = x.ravel()
+            perm = jax.random.permutation(key, flat.size)
+            shuffled = flat[perm].reshape(x.shape)
+            inv_perm = jnp.argsort(perm)
+            return shuffled, inv_perm
+        shuffled_x, inv_perm = shuffle(key, _x)
+
+        ratio_permutation = q_permutation / (q_hamiltonian + q_permutation)
+        proposed = jnp.where(u3 > ratio_permutation, x_conn[idx + 1], shuffled_x)  # randomly choose to flip or not for the proposed configuration
+        
+        # choose whether to stay
+        q = q_hamiltonian + q_permutation
+        x_p = jnp.where(u1 > q, _x, proposed)  # equivalent to u1 < 1-q
+        
+        # reweighting factor calculation:
+        # stay (1-q) p(stay)
+        logpsi_stay = apply_fn({"params": params}, x_p)
+        logp_stay = 2.0 * logpsi_stay.real
+        log_term_main = jnp.log1p(-q) + logp_stay
+
+        # permutation: note the inv_perm q_permutation p(inv_perm(x_p))
+        logpsi_permutation = apply_fn({"params": params}, x_p[inv_perm])
+        logp_permutation = 2.0 * logpsi_permutation.real
+        log_term_permutation = jnp.log(q_permutation) + logp_permutation
+
+        # hamiltonian connected: note logp_all[1:] excludes the diagonal element which corresponds to "stay"
+        x_p_conn, mels = op.get_conn_padded(x_p)
+        logpsi_all = apply_fn({"params": params}, x_p_conn)
+        logp_all = 2.0 * logpsi_all.real
+        log_term_conn = (
+            jnp.log(q_hamiltonian) - jnp.log(n_conn) + jsp.special.logsumexp(logp_all[1:])
+        )
+
+        # assemble the reweighting factor
+        log_w_bridge = jsp.special.logsumexp(jnp.stack([log_term_main, log_term_permutation, log_term_conn]))
+        w_bridge = jnp.exp(logp_stay - log_w_bridge) 
+
+        # Calculate local energies
+        E_loc = jnp.sum(
+            mels * jnp.exp(logpsi_all - jnp.expand_dims(logpsi_stay, -1)), axis=-1
+        )
+        return x_p.reshape(_x_shape), w_bridge, jnp.atleast_1d(E_loc)
+
+    vmapped_get_bridge_sample_and_weight = jax.vmap(
+        get_bridge_sample_and_Eloc, in_axes=0
+    )
+    if chunk_size is None:
+        return vmapped_get_bridge_sample_and_weight((x, c, keys))
+    else:
+        return nkjax.apply_chunked(
+            vmapped_get_bridge_sample_and_weight, in_axes=0, chunk_size=64
+        )((x, c, keys))
