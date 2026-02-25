@@ -129,6 +129,7 @@ class TDVPSchmittRandomizedBridge(TDVPBaseDriver):
         *,
         q1: float = 0.1,
         q2: float = 0.1,
+        flip_prob: float = 0.1,
         t0: float = 0.0,
         propagation_type: str = "real",
         holomorphic: bool | None = None,
@@ -213,6 +214,7 @@ class TDVPSchmittRandomizedBridge(TDVPBaseDriver):
             raise ValueError(f"`q2` must satisfy 0 < q2 < 1, received {q2}")
         self.q2 = q2
         self.q = [q1, q2]
+        self.flip_prob = flip_prob
 
         if distributed_eigh and not JAXMG_ENABLED:
             raise ImportError(
@@ -443,6 +445,7 @@ def odefun_custom(
         op=op_t,
         q1=self.q1,
         q2=self.q2,
+        flip_prob=self.flip_prob,
         chunk_size=chunk_size,
     )(samples, key, w)
     # Monitor ESS of the combined weights

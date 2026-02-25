@@ -68,6 +68,7 @@ def main(q1, q2, rcond):
             n_samples=n_samples,
             seed=100,
             sampler_seed=100,
+            n_discard_per_chain=discard,
         )
 
     def get_vstate_parameters(n_samples):
@@ -118,13 +119,7 @@ def main(q1, q2, rcond):
             j = y * Lx + (x + 1)
             x_bonds.append((i, j))
     x_bonds_graph = nk.graph.Graph(edges=x_bonds)
-    # H = graph.to_networkx()
-    # G = x_bonds_graph.to_networkx()
-    # import networkx as nx
 
-    # fig, (axs0, axs1) = plt.subplots(1, 2)
-    # nx.draw(G, node_color="orange", ax=axs0, with_labels=True)
-    # nx.draw(H, ax=axs1, with_labels=True)
     heisenberg_x = nk.operator.Heisenberg(hilbert, x_bonds_graph, J=1.0)
     quench_hamiltonian = lambda t: hamiltonian + pulse_partial(t) * heisenberg_x
     s_correlator = nk.operator.Heisenberg(hilbert, x_bonds_graph, J=1.0 / N)
@@ -155,7 +150,7 @@ def main(q1, q2, rcond):
         return True
 
     T = 10
-    n_samples_tvmc = 7000
+    n_samples_tvmc = 2**14
     save_times = np.linspace(0.0, T, 20)
     exp_name = f"bridge_{n_samples_tvmc}_Ap_{A_p:1.2f}_q1_{q1:1.2f}_q2_{q2:1.2f}_rcond_{rcond:1.1e}_discard_{discard}"
     # Make sure we always start with the same state in notebook
@@ -179,7 +174,7 @@ def main(q1, q2, rcond):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-    for i in range(4000):
+    for i in range(4000 // discard + 1):
         vstate.sample()
     callbacks = []
     callbacks.append(measure_corr)

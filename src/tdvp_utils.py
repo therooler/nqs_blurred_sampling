@@ -219,7 +219,7 @@ def bridge_sample(
 
 @partial(jax.jit, static_argnames=("apply_fn", "chunk_size"))
 def randomized_bridge_sample(
-    x: Array, key, params, q1: float, q2: float, apply_fn, op: AbstractOperator, chunk_size
+    x: Array, key, params, q1: float, q2: float, flip_prob: float, apply_fn, op: AbstractOperator, chunk_size
 ):
     """One-step "bridge" proposal with importance weights.
 
@@ -276,7 +276,7 @@ def randomized_bridge_sample(
         u1, u2 = rng
         _x_shape = _x.shape
         _x = _x.reshape(-1)
-        flip = 1 - 2 * jax.random.bernoulli(key, 0.1, _x.shape)
+        flip = 1 - 2 * jax.random.bernoulli(key, flip_prob, _x.shape)
         flip_proposed = _x * flip
 
         # Connected elements of Hamiltonian
