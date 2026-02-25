@@ -127,8 +127,8 @@ class TDVPSchmittRandomizedBridge(TDVPBaseDriver):
         variational_state: VariationalState,
         integrator: AbstractSolver = None,
         *,
-        q: float = 0.1,
-        flip_prob: float = 0.5,
+        q1: float = 0.1,
+        q2: float = 0.1,
         t0: float = 0.0,
         propagation_type: str = "real",
         holomorphic: bool | None = None,
@@ -206,10 +206,13 @@ class TDVPSchmittRandomizedBridge(TDVPBaseDriver):
 
         self._monitor = {}
 
-        if not (0 < q < 1):
-            raise ValueError(f"`q` must satisfy 0 < q < 1, received {q}")
-        self.q = q
-        self.flip_prob = flip_prob
+        if not (0 < q1 < 1):
+            raise ValueError(f"`q1` must satisfy 0 < q1 < 1, received {q1}")
+        self.q1 = q1
+        if not (0 < q2 < 1):
+            raise ValueError(f"`q2` must satisfy 0 < q2 < 1, received {q2}")
+        self.q2 = q2
+        self.q = [q1, q2]
 
         if distributed_eigh and not JAXMG_ENABLED:
             raise ImportError(
@@ -438,8 +441,8 @@ def odefun_custom(
         randomized_bridge_sample,
         apply_fn=state._apply_fun,
         op=op_t,
-        q=self.q,
-        flip_prob=self.flip_prob,
+        q1=self.q1,
+        q2=self.q2,
         chunk_size=chunk_size,
     )(samples, key, w)
     # Monitor ESS of the combined weights
