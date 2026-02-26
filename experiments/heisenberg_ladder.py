@@ -1,4 +1,5 @@
 import os
+# os.environ['JAX_PLATFORM_NAME'] = 'cpu'
 import matplotlib.pyplot as plt
 from matplotlib import colors
 
@@ -13,6 +14,8 @@ from netket.experimental.dynamics import RK45, Heun
 from callbacks import (
     get_tdvp_monitor_callback,
     get_umbrella_monitor_callback,
+    get_acceptance_rate_callback,
+
 )
 
 from logger import Logger
@@ -25,8 +28,11 @@ from flax import serialization
 from schmitt_tdvp_bridge import TDVPSchmittBridge
 from schmitt_tdvp import TDVPSchmitt
 from schmitt_tdvp_randomized_bridge import TDVPSchmittRandomizedBridge
-import argparse
+from geometric_tdvp import TDVPGeometric
 
+
+import argparse
+import jax
 
 def main(q):
 
@@ -145,6 +151,7 @@ def main(q):
         # Per-step SNRs from OVar
         ("snr", "values"),
         ("snr_F", "values"),
+        ("acceptance_rate", "values"),
     )
 
     def measure_corr(step, log, driver):
@@ -176,7 +183,7 @@ def main(q):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-    for i in range(100):
+    for i in range(0):
         vstate.sample()
     callbacks = []
     callbacks.append(measure_corr)
@@ -185,7 +192,7 @@ def main(q):
     else:
         tdvp_monitor_callback = get_umbrella_monitor_callback(save_times, save_path)
     callbacks.append(tdvp_monitor_callback)
-
+    callbacks.append(get_acceptance_rate_callback())
     # integrator = RK45(dt, adaptive=False, rtol=1e-6, dt_limits=(1e-5, 1e-2))
     integrator = Heun(dt)
     tvmc_kwargs = {}
@@ -210,19 +217,31 @@ def main(q):
             q=q,
             holomorphic=False,
             snr_atol=2,
-            rcond=1e-9,
+            rcond=1e-7,
             rcond_smooth=1e-10,
             **tvmc_kwargs,
         )
         # driver = TDVPSchmittRandomizedBridge(
-        #     hamiltonian,
+        #     quench_hamiltonian,
         #     vstate,
         #     integrator,
         #     t0=0,
         #     flip_prob=q,
         #     holomorphic=False,
         #     snr_atol=2,
-        #     rcond=1e-7,
+        #     rcond=1e-9,
+        #     rcond_smooth=1e-10,
+        #     **tvmc_kwargs,
+        # )
+        # driver = TDVPGeometric(
+        #     quench_hamiltonian,
+        #     vstate,
+        #     integrator,
+        #     t0=0,
+        #     q=q,
+        #     holomorphic=False,
+        #     snr_atol=2,
+        #     rcond=1e-14,
         #     rcond_smooth=1e-10,
         #     **tvmc_kwargs,
         # )

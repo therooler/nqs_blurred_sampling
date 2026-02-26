@@ -23,7 +23,7 @@ import numpy as np
 import jax.scipy as jsp
 from netket import stats
 from netket.operator import AbstractOperator, DiscreteJaxOperator
-from netket.optimizer.qgt.qgt_jacobian import QGTJacobianDenseT
+from netket.optimizer.qgt.qgt_jacobian import QGTJacobian_DefaultConstructor
 from netket.optimizer.qgt.qgt_jacobian_dense import convert_tree_to_dense_format
 from netket.utils.api_utils import partial_from_kwargs
 from netket.vqs import VariationalState, VariationalMixedState, MCState
@@ -376,15 +376,13 @@ def _impl(
     # update,_ = pinv_smooth(qgt, rhs_coeff * F)
     # rmd = 1e-10
     # Reassemble update into parameter tree
-    y, reassemble = convert_tree_to_dense_format(parameters, mode)
+    y, reassemble = convert_tree_to_dense_format(parameters, S.mode)
     update_tree = reassemble(update if jnp.iscomplexobj(y) else update.real)
     dw = tree_cast(update_tree, parameters)
-
     # For compatibility, fill snr, ev, ev_reg with dummy values
     snr = jnp.zeros_like(F.real)
     ev = jnp.zeros_like(F.real)
     ev_reg = jnp.zeros_like(F.real)
-
     return E, dw, rmd, snr, snr_F, ev, ev_reg
 
 
@@ -393,7 +391,8 @@ def regularize(A, rcond, rcond_smooth):
     ev_cutoff = jnp.where(jnp.abs(ev / ev[-1]) > rcond, ev, 0.0)
     # Set regularizer for singular value cutoff
     regularizer = (1.0 + (rcond_smooth / jnp.abs(ev / ev[-1])) ** 6)
-    ev = ev_cutoff * regularizer
+    # the product can underflow, so we set to zero here.
+    ev = jnp.nan_to_num(ev_cutoff * regularizer)
     return V @ jnp.diag(ev) @ V.conj().T
 
 
