@@ -29,15 +29,16 @@ from schmitt_tdvp_randomized_permutation_bridge import (
 )
 
 
-def main(q1, q2, rcond):
-
+def main(q1, q2, rcond, base_seed, run_id):
+    seed = base_seed + run_id
+    print("seed =", seed)
     Lx = 8
     Ly = 2
     A_p = 0.10
     time_step = 2e-3
 
     N = Lx * Ly
-    discard = 50  # thermalization
+    discard = 16 # thermalization
 
     hilbert = nk.hilbert.Spin(s=1 / 2, N=N, total_sz=0)
     graph = nk.graph.Grid((Lx, Ly), pbc=(True, False))
@@ -51,7 +52,7 @@ def main(q1, q2, rcond):
 
     pulse_partial = partial(pulse, A_p=A_p, omega_p=8.0, sigma_p=0.4, t_p=0.987)
 
-    def get_vstate(n_samples):
+    def get_vstate(n_samples, seed = 100):
         sampler = nk.sampler.MetropolisExchange(
             hilbert, graph=graph, n_chains=n_samples
         )
@@ -66,13 +67,13 @@ def main(q1, q2, rcond):
             sampler=sampler,
             model=model,
             n_samples=n_samples,
-            seed=100,
-            sampler_seed=100,
+            seed=seed,
+            sampler_seed=seed,
             n_discard_per_chain=discard,
         )
 
-    def get_vstate_parameters(n_samples):
-        vstate = get_vstate(n_samples)
+    def get_vstate_parameters(n_samples, seed = 100):
+        vstate = get_vstate(n_samples, seed=seed)
 
         # Thermalize
         for i in range(100):
@@ -150,15 +151,15 @@ def main(q1, q2, rcond):
         return True
 
     T = 10
-    n_samples_tvmc = 2**14
+    n_samples_tvmc = 7000
     save_times = np.linspace(0.0, T, 20)
-    exp_name = f"bridge_{n_samples_tvmc}_Ap_{A_p:1.2f}_q1_{q1:1.2f}_q2_{q2:1.2f}_rcond_{rcond:1.1e}_discard_{discard}"
+    exp_name = f"bridge_{n_samples_tvmc}_Ap_{A_p:1.2f}_q1_{q1:1.2f}_q2_{q2:1.2f}_rcond_{rcond:1.1e}_discard_{discard}_run_{run_id:02d}"
     # Make sure we always start with the same state in notebook
 
     save_path = f"./data/HEISENBERG_LADDER_{Lx}_{Ly}/{exp_name}/"
 
     logger = Logger(path=save_path, fields=fields_to_track)
-    vstate = get_vstate(n_samples_tvmc)
+    vstate = get_vstate(n_samples_tvmc, seed=seed)
     if logger.restore():
         if logger.done:
             print("Data exists, skipping...")
@@ -226,7 +227,11 @@ def main(q1, q2, rcond):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--q1", default=0.2, type=float)
-    parser.add_argument("--q2", default=0.6, type=float)
-    parser.add_argument("--rcond", default=1e-8, type=float)
+    parser.add_argument("--q2", default=0.2, type=float)
+    parser.add_argument("--rcond", default=1e-7, type=float)
+    parser.add_argument("--n_runs", default=10, type=int)
+    parser.add_argument("--base_seed", default=100, type=int)
     args = parser.parse_args()
-    main(float(args.q1), float(args.q2), float(args.rcond))
+    base_seed = args.base_seed
+    for run_id in range(args.n_runs):
+        main(float(args.q1), float(args.q2), float(args.rcond), base_seed, run_id)

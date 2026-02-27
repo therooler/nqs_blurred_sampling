@@ -28,8 +28,24 @@ def green_function_from_two(L: Array, R: Array) -> Array:
     X = jnp.linalg.solve(M, Lh)             
     gbar = R @ X                            
     N = gbar.shape[-1]
-    I = jnp.eye(N, dtype=gbar.dtype)
-    return I - 2 * gbar
+    return gbar.T - gbar
+
+@jax.jit
+def uvT_from_two(L: Array, R: Array) -> Array:
+    Lh = jnp.swapaxes(L.conj(), -1, -2)    
+    M = Lh @ R                              
+    X = jnp.linalg.solve(M, Lh)       
+    return -R, X
+
+# @jax.jit
+# def green_function_from_two(L: Array, R: Array) -> Array:
+#     Lh = jnp.swapaxes(L.conj(), -1, -2)    
+#     M = Lh @ R                              
+#     X = jnp.linalg.solve(M, Lh)             
+#     gbar = R @ X                            
+#     N = gbar.shape[-1]
+#     I = jnp.eye(N, dtype=gbar.dtype)
+#     return I - 2 * gbar
 
 @jax.jit
 def logeta_g_expH_from_H(H):
@@ -68,12 +84,26 @@ def log_eta_propagation(G1, G2, logeta1, logeta2):
     return logeta1 + logeta2 + log_combined_sign + logabs_pf
 
 # res = exp(1/4 H\gamma \gamma) \ket{right} \bra{left}
-@jax.jit
+# @jax.jit
+# def expH_times_fgo_state(H, fgo_tuple):
+#     logeta_state, ket, bra = fgo_tuple
+#     G_state = green_function_from_two(bra, ket)
+#     logeta_expH, G_expH, expH = logeta_g_expH_from_H(H)
+#     logeta_new = log_eta_propagation(G_expH, G_state, logeta_expH, logeta_state)
+#     ket_new = expH @ ket
+#     ket_new, _ = jnp.linalg.qr(ket_new)
+#     return logeta_new, ket_new, bra
+
+
+# @jax.jit
 def expH_times_fgo_state(H, fgo_tuple):
     logeta_state, ket, bra = fgo_tuple
-    G_state = green_function_from_two(bra, ket)
+    u, vT = uvT_from_two(bra, ket)
     logeta_expH, G_expH, expH = logeta_g_expH_from_H(H)
-    logeta_new = log_eta_propagation(G_expH, G_state, logeta_expH, logeta_state)
+    B = -jnp.eye(vT.shape[0]) + u.T @ G_expH @ vT.T
+    signpf, logpf = slog_pfaffian(jnp.block([[u.T @ G_expH @ u, B], 
+                             [-B.T, vT @ G_expH @ vT.T]]))
+    logeta_new = logeta_expH + logeta_state + logpf + jnp.log(signpf.astype(jnp.complex128))
     ket_new = expH @ ket
     ket_new, _ = jnp.linalg.qr(ket_new)
     return logeta_new, ket_new, bra

@@ -9,12 +9,15 @@ sys.path.append("../src")
 import jax
 import jax.numpy as jnp
 
+import warnings
+warnings.filterwarnings("error", category=jnp.ComplexWarning)
+
 import netket as nk
 import numpy as np
 
 from netket.operator.spin import sigmax, sigmaz
 from metropolis import LocalDoubleFlipRule
-from netket.experimental.dynamics import RK45
+from netket.experimental.dynamics import RK45, Heun 
 from callbacks import (
     get_acceptance_rate_callback,
     get_umbrella_monitor_callback,
@@ -34,7 +37,7 @@ from flax import serialization
 from gaussian_state import GaussianState
 
 
-def main(N, n_samples_tvmc, driver_type, q, h, chunk_size):
+def main(N, n_samples_tvmc, driver_type, q, h, T, dt_, chunk_size):
     print(N, n_samples_tvmc, driver_type, q, h)
     hilbert = nk.hilbert.Spin(s=1 / 2, N=N)
 
@@ -114,19 +117,18 @@ def main(N, n_samples_tvmc, driver_type, q, h, chunk_size):
         log["parity"] = driver.state.expect(sigma_z)
         return True
 
-    T = 2.0
     save_times = np.linspace(0.0, T, 40)
     if driver_type == "bridge":
-        exp_name = f"bridge_{n_samples_tvmc}_{q:1.2f}"
+        exp_name = f"bridge_{n_samples_tvmc}_h_{h:1.3f}_q_{q:1.3f}_T_{T:1.3f}"
     elif driver_type == "vanilla":
-        exp_name = f"vanilla_{n_samples_tvmc}"
+        exp_name = f"vanilla_{n_samples_tvmc}_h_{h:1.3f}_T_{T:1.3f}"
     else:
         raise NotImplementedError
     # Make sure we always start with the same state in notebook
 
     save_path = f"./data/TFIM_PFAFF_{N}_parity/{exp_name}/"
 
-    logger = Logger(path=save_path, fields=fields_to_track)
+    logger = Logger(path=save_path, fields=fields_to_track, save_every=5)
     if logger.restore():
         if logger.done:
             print("Data exists, skipping...")
@@ -169,7 +171,9 @@ def main(N, n_samples_tvmc, driver_type, q, h, chunk_size):
     parameter_save_callback = get_parameter_save_callback(save_times, logger)
     callbacks.append(parameter_save_callback)
 
-    integrator = RK45(dt, adaptive=True, rtol=1e-4, dt_limits=(1e-5, 1e-2))
+    # integrator = RK45(dt, adaptive=True, rtol=1e-4, dt_limits=(1e-5, 1e-2))
+    dt = dt_
+    integrator = Heun(dt)
     tvmc_kwargs = {}
 
     if driver_type == "bridge":
@@ -195,6 +199,7 @@ def main(N, n_samples_tvmc, driver_type, q, h, chunk_size):
             snr_atol=2,
             rcond=1e-14,
             rcond_smooth=1e-10,
+            distributed_eigh=True,
             **tvmc_kwargs,
         )
     else:
@@ -218,6 +223,8 @@ if __name__ == "__main__":
     parser.add_argument("--q", default=0.5, type=float)
     parser.add_argument("--h", default=1.0, type=float)
     parser.add_argument("--chunk_size", type=int)
+    parser.add_argument("--T", default=0.5, type=float)
+    parser.add_argument("--dt", default=1e-3, type=float)
     args = parser.parse_args()
     print(args.chunk_size)
     main(
@@ -226,5 +233,7 @@ if __name__ == "__main__":
         args.driver_type,
         float(args.q),
         float(args.h),
+        float(args.T),
+        float(args.dt),
         args.chunk_size
     )
