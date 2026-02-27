@@ -327,21 +327,12 @@ class GaussianState(nn.Module):
         return jax.vmap(batch_fun)(x)
 
 
-def green_function_from_two(L, R):
+def green_function_braket(L, R):
     Lh = jnp.swapaxes(L.conj(), -1, -2)  # (..., n, N)
     M = Lh @ R  # (..., n, n)
     X = jnp.linalg.solve(M, Lh)  # batch-solve supported
     gbar = R @ X  # (..., N, N)
-    N = gbar.shape[-1]
-    I = jnp.eye(N, dtype=gbar.dtype)
-    return I - 2 * gbar
-
-
-def green_function_from_s_plus(s, plus_state):
-    # s_i * s_{i+1}
-    zz_val = s * jnp.roll(s, -1, axis=-1)
-    v = majorana_zz_state(zz_val)
-    return green_function_from_two(v, plus_state)
+    return gbar.T - gbar
 
 
 def log_eta_propagation(G1, G2, logeta1, logeta2):
@@ -364,122 +355,108 @@ def log_eta_propagation(G1, G2, logeta1, logeta2):
     return logeta1 + logeta2 + log_combined_sign + logabs_pf
 
 
-def gen_v_from_zz_px(zz, PX=1):
-    zz = jnp.asarray(zz)
-    n = zz.shape[-1]
-    N = 2 * n
-    sgn = jnp.sign(zz)
-    sgn = sgn.at[..., -1].set(-PX * sgn[..., -1])  # the parity change a sign here
-
-    norm = 1.0 / jnp.sqrt(2.0)
-    top = (-1j * sgn) * norm
-    bot = (1.0 + 0j) * norm
-
-    a_idx = 2 * jnp.arange(n) + 1  # (n,)
-    b_idx = (2 * jnp.arange(n) + 2) % N
-    col_idx = jnp.arange(n)
-
-    # make v with batch dims
-    batch_shape = zz.shape[:-1]
-    v = jnp.zeros(batch_shape + (N, n), dtype=jnp.complex128)
-
-    # scatter into the last two axes
-    v = v.at[..., a_idx, col_idx].set(top)
-    v = v.at[..., b_idx, col_idx].set(bot)  # bot broadcasts to (..., n)
-    return v
-
-
-def green_function_from_s_state(s, state, PX=1):
-    # s_i * s_{i+1}
-    zz_val = s * jnp.roll(s, -1, axis=-1)
-    v = gen_v_from_zz_px(zz_val, PX)
-    return green_function_from_two(v, state)
-
-
-def gen_green_init_s_proj(s, PX=1):
-    zz_val = s * jnp.roll(s, -1, axis=-1)
-    v = gen_v_from_zz_px(zz_val, PX)
-    return v, green_function_from_two(v, v)
-
-
+@jax.jit
 def logeta_g_expH_from_H(H):
+    N = H.shape[0]
     H_hermitian = 1.0j * (H - H.T) / 2
     e, v = jnp.linalg.eigh(H_hermitian)
-    green_function = v @ jnp.diag(1.0j * jnp.tan(e / 2.0)) @ v.conj().T
-    green_function = jnp.real(green_function)
-    e_pos = e[: e.shape[-1] // 2]
-    val = jnp.cos(e_pos / 2.0)
-    logeta = jnp.sum(jnp.log(val.astype(jnp.complex128)))
-    return logeta, green_function, v @ jnp.diag(jnp.exp(-1.0j * e)) @ v.conj().T
+    D = 1.0j * jnp.tan(e / 2.0)
+    green_function = (v *D) @ v.conj().T
+    green_function = 0.5 * (green_function - green_function.T)
+    e_pos = e[: N // 2]
+    logeta = jnp.sum(jnp.log(jnp.cos(e_pos / 2.0).astype(jnp.complex128)))
+    expD = jnp.exp(-1.0j * e)
+    return logeta, green_function, (v * expD) @ v.conj().T
 
 
-class EpsilonState(nn.Module):
-    param_dtype: Any = jnp.float64
-    s0: Tuple = ()
+def make_epsilon_model(s0_tuple, **kwargs):
+    s0 = jnp.array(s0_tuple)
+    n = s0.shape[0]
+    # precompute 
+    plus_state = majorana_plus_state(n)
+    minus_state = majorana_minus_state(n)
+    s0_plus = majorana_state_from_spins(s0, PX=1)
+    s0_minus = majorana_state_from_spins(s0, PX=-1)
 
-    @nn.compact
-    def __call__(self, x) -> Any:
-        n = x.shape[-1]
-        H_plus = self.param(
-            "H1",
-            nn.initializers.normal(0.0001),
-            (2 * n, 2 * n),
-            self.param_dtype,
-        )
-        H_minus = self.param(
-            "H2",
-            nn.initializers.normal(0.0001),
-            (2 * n, 2 * n),
-            self.param_dtype,
-        )
-        plus_state = majorana_plus_state(n)
-        minus_state = majorana_minus_state(n)
-        s0 = jnp.array(self.s0)
-        v_plus, Gz_plus = gen_green_init_s_proj(s0, PX=1)
-        v_minus, Gz_minus = gen_green_init_s_proj(s0, PX=-1)
-        logeta_expH_plus, G_expH_plus, expH_plus = logeta_g_expH_from_H(H_plus)
-        logeta_expH_minus, G_expH_minus, expH_minus = logeta_g_expH_from_H(H_minus)
-        logeta_Ghz_plus = log_eta_propagation(
-                G_expH_plus, Gz_plus, logeta_expH_plus, 0.0
-            )
-        expH_v_plus = expH_plus @ v_plus
-        Ghz_plus = green_function_from_two(v_plus, expH_v_plus)
+    class EpsilonState(nn.Module):
+        param_dtype: Any = jnp.float64
+        parametrization: str = "dense"  # "dense" or "banded"
+        band_k: int = 10  # only used if banded
 
-        logeta_Ghz_minus = log_eta_propagation(
-                G_expH_minus, Gz_minus, logeta_expH_minus, 0.0
-            )
-        expH_v_minus = expH_minus @ v_minus
-        Ghz_minus = green_function_from_two(v_minus, expH_v_minus)
+        @nn.compact
+        def __call__(self, x) -> Any:
+            n = x.shape[-1]
+            N = 2 * n
+            # parameterization
+            if self.parametrization == "dense":
+                # compress the skew-symmetric matrix into a vector for parameterization
+                num = (2 * n - 1) * n
+                H1_raw = self.param(
+                    "H1_raw",
+                    nn.initializers.normal(0.0001),
+                    (num,),
+                    self.param_dtype,
+                )
+                H2_raw = self.param(
+                    "H2_raw",
+                    nn.initializers.normal(0.0001),
+                    (num,),
+                    self.param_dtype,
+                )
+                H_plus = skew_from_vec(H1_raw, N)
+                H_minus = skew_from_vec(H2_raw, N)
+            else:
+                k = self.band_k
+                num = N * (k - 1)
+                H1_raw = self.param(
+                    "H1_raw",
+                    nn.initializers.normal(0.0001),
+                    (num,),
+                    self.param_dtype,
+                )
+                H2_raw = self.param(
+                    "H2_raw",
+                    nn.initializers.normal(0.0001),
+                    (num,),
+                    self.param_dtype,
+                )
+                H_plus = skew_banded_pbc_from_vec(H1_raw, N, k)
+                H_minus = skew_banded_pbc_from_vec(H2_raw, N, k)
 
-        def batch_fun(_x):
-            Gs_plus = green_function_from_s_state(_x, plus_state, PX=1)
-            Gs_minus = green_function_from_s_state(_x, minus_state, PX=-1)
+            # calculate the trace and green function 
+            # for exp(1/4 H_ij \gamma_i\gamma_j)|s0><s0|
+            logeta_expH_plus, GH_plus, expH_plus = logeta_g_expH_from_H(H_plus)
+            logeta_expH_minus, GH_minus, expH_minus = logeta_g_expH_from_H(H_minus)
+            # the trace
+            logeta_GHs0_plus = expectation_gaussian_braket(s0_plus, GH_plus, s0_plus)
+            logeta_GHs0_plus += logeta_expH_plus
+            logeta_GHs0_minus = expectation_gaussian_braket(s0_minus, GH_minus, s0_minus)
+            logeta_GHs0_minus += logeta_expH_minus
+            # the green function
+            GHs0_plus = green_function_braket(s0_plus, expH_plus @ s0_plus)
+            GHs0_minus = green_function_braket(s0_minus, expH_minus @ s0_minus)
 
-            logoverlap_plus = log_eta_propagation(
-                Ghz_plus, Gs_plus, logeta_Ghz_plus, 0.0
-            )
+            def batch_fun(_x):
+                x_plus = majorana_state_from_spins(_x, PX=1)
+                x_minus = majorana_state_from_spins(_x, PX=-1)
 
-            logoverlap_minus = log_eta_propagation(
-                Ghz_minus, Gs_minus, logeta_Ghz_minus, 0.0
-            )
+                exp_plus = expectation_gaussian_braket(x_plus, GHs0_plus, plus_state)
+                exp_minus = expectation_gaussian_braket(x_minus, GHs0_minus, minus_state)
 
-            logamp = logsumexp(
-                jnp.stack(
-                    [
-                        logoverlap_minus,
-                        jnp.log(
-                            _x[-1].astype(jnp.complex128)
-                            * s0[-1].astype(jnp.complex128)
-                        )
-                        + logoverlap_plus,
-                    ],
+                logamp_plus = exp_plus + logeta_GHs0_plus
+                logamp_minus = exp_minus + logeta_GHs0_minus
+                logamp_minus += jnp.log((_x[-1] * s0[-1]).astype(jnp.complex128))
+
+                logamp = logsumexp(
+                    jnp.stack([logamp_plus, logamp_minus], axis=0),
                     axis=0,
-                ),
-                axis=0,
-            )
-            return logamp
+                )
 
-        return jax.vmap(batch_fun)(x)
+                return logamp
+
+            return jax.vmap(batch_fun)(x)
+
+    return EpsilonState(**kwargs)
 
 
 if __name__ == "__main__":
@@ -506,7 +483,7 @@ if __name__ == "__main__":
         else:
             sigma_zs += nk.operator.PauliStringsJax(hilbert, "".join(string), 1.0 / N)
 
-    model = EpsilonState(s0=s0)
+    model = make_epsilon_model(s0=s0)
 
     vstate = nk.vqs.MCState(
         sampler=sampler,
