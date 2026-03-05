@@ -465,7 +465,6 @@ def odefun_custom(
         holomorphic=self.holomorphic,
         chunk_size=chunk_size,
     )
-
     (
         self._loss_stats,
         self._dw,
