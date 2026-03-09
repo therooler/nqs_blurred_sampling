@@ -45,6 +45,7 @@ def main(
     ansatz="gaussian",
     chunk_size=1024,
     alpha=1,
+    correlation = 0.0
 ):
     hilbert = nk.hilbert.Spin(s=1 / 2, N=N)
     if ansatz == "gaussian":
@@ -83,7 +84,7 @@ def main(
                 kernel_init=nn.initializers.normal(1e-3),
                 symmetries=graph.translation_group(),
             )
-            model = DressedRBM(rbm=rbm_model, amp_init=1e-5)
+            model = DressedRBM(rbm=rbm_model, amp_init=1e-5 * 2.**(-N/2.), correlation=correlation)
             vstate = nk.vqs.MCState(
                 sampler=sampler,
                 model=model,
@@ -92,15 +93,11 @@ def main(
                 sampler_seed=100,
                 chunk_size=chunk_size,
             )
-            # eps_params = vstate.parameters.copy()
-            # K = 3
-            # a = jnp.array([-K], dtype=eps_params["visible_bias"].dtype)
-            # eps_params["visible_bias"] = a
-            # vstate.parameters = eps_params.copy()
+
             vstate.sampler_state = vstate.sampler_state.replace(
                 σ=jnp.array([[-1] * N] * n_samples, dtype=jnp.int8)
             )
-            for i in range(1):
+            for i in range(10):
                 vstate.sample(n_samples=n_samples)
             print(f"Number of parameters: {vstate.n_parameters}")
             return vstate
@@ -148,7 +145,7 @@ def main(
     from schmitt_tdvp import TDVPSchmitt
 
     save_times = np.linspace(0.0, T, 20)
-    exp_name = f"bridge_{n_samples_tvmc}_{ansatz}_q1_{q1:.2f}_q2_{q2:.2f}_T_{T:.2f}_alpha_{alpha}"
+    exp_name = f"bridge_{n_samples_tvmc}_{ansatz}_q1_{q1:.2f}_q2_{q2:.2f}_T_{T:.2f}_alpha_{alpha}_correlation_{correlation:.2f}"
     # Make sure we always start with the same state in notebook
 
     save_path = f"./data/TFIM_EPS_{N}/{exp_name}/"
@@ -214,7 +211,7 @@ def main(
                 t0=0,
                 q1=q1,
                 q2=q2,
-                flip_prob = 0.5,
+                flip_prob = 1/N,
                 holomorphic=False,
                 snr_atol=2,
                 rcond=1e-14,
@@ -243,6 +240,7 @@ if __name__ == "__main__":
     parser.add_argument("--chunk_size", default=1024, type=int)
     parser.add_argument("--dt", default=0.01, type=float)
     parser.add_argument("--alpha", default=1, type=int)
+    parser.add_argument("--correlation", default=0.0, type=float)
     args = parser.parse_args()
     main(
         int(args.N),
@@ -254,4 +252,5 @@ if __name__ == "__main__":
         ansatz=args.ansatz,
         chunk_size=int(args.chunk_size),
         alpha=int(args.alpha),
+        correlation=float(args.correlation)
     )
