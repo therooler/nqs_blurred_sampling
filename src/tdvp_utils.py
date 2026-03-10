@@ -86,7 +86,7 @@ def ess_from_weights_var(w):
 
 
 @partial(jax.jit, static_argnames=("apply_fn", "chunk_size", "diagonal_mels"))
-def bridge_sample(
+def blurred_sample(
     x: Array, key, params, q: float, apply_fn, op: AbstractOperator, chunk_size, diagonal_mels:bool=True,
 ):
     """One-step "bridge" proposal with importance weights.
@@ -138,7 +138,7 @@ def bridge_sample(
     # rng for u1, u2 per configuration
     c = jax.random.uniform(key, shape=(batch_size, 2))
     if diagonal_mels:
-        def get_bridge_sample_and_Eloc(_in):
+        def get_blurred_sample_and_Eloc(_in):
             _x, rng = _in
             u1, u2 = rng
             _x_shape = _x.shape
@@ -173,7 +173,7 @@ def bridge_sample(
             )
             return x_p.reshape(_x_shape), w_bridge, jnp.atleast_1d(E_loc)
     else:
-        def get_bridge_sample_and_Eloc(_in):
+        def get_blurred_sample_and_Eloc(_in):
             _x, rng = _in
             u1, u2 = rng
             _x_shape = _x.shape
@@ -206,22 +206,22 @@ def bridge_sample(
                 mels * jnp.exp(logpsi_all - jnp.expand_dims(logpsi_stay, -1)), axis=-1
             )
             return x_p.reshape(_x_shape), w_bridge, jnp.atleast_1d(E_loc)
-    vmapped_get_bridge_sample_and_weight = jax.vmap(
-        get_bridge_sample_and_Eloc, in_axes=0
+    vmapped_get_blurred_sample_and_weight = jax.vmap(
+        get_blurred_sample_and_Eloc, in_axes=0
     )
     if chunk_size is None:
-        return vmapped_get_bridge_sample_and_weight((x, c))
+        return vmapped_get_blurred_sample_and_weight((x, c))
     else:
         return nkjax.apply_chunked(
-            vmapped_get_bridge_sample_and_weight, in_axes=0, chunk_size=chunk_size, axis_0_is_sharded=False
+            vmapped_get_blurred_sample_and_weight, in_axes=0, chunk_size=chunk_size, axis_0_is_sharded=False
         )((x, c))
 
 
 @partial(jax.jit, static_argnames=("apply_fn", "chunk_size"))
-def randomized_bridge_sample(
+def randomized_blurred_sample(
     x: Array, key, params, q: float, flip_prob: float, apply_fn, op: AbstractOperator, chunk_size
 ):
-    """One-step "bridge" proposal with importance weights.
+    """One-step "blurred" proposal with importance weights.
 
     For each input configuration ``x[i]``, this kernel constructs a simple mixture proposal:
 
@@ -271,7 +271,7 @@ def randomized_bridge_sample(
     c = jax.random.uniform(subkey1, shape=(batch_size, 1))
     keys = jax.random.split(subkey2, batch_size)
 
-    def get_bridge_sample_and_Eloc(_in):
+    def get_blurred_sample_and_Eloc(_in):
         _x, rng, key = _in
         u1 = rng
         _x_shape = _x.shape
@@ -303,12 +303,12 @@ def randomized_bridge_sample(
         )
         return x_p.reshape(_x_shape), w_bridge, jnp.atleast_1d(E_loc)
 
-    vmapped_get_bridge_sample_and_weight = jax.vmap(
-        get_bridge_sample_and_Eloc, in_axes=0
+    vmapped_get_blurred_sample_and_weight = jax.vmap(
+        get_blurred_sample_and_Eloc, in_axes=0
     )
     if chunk_size is None:
-        return vmapped_get_bridge_sample_and_weight((x, c, keys))
+        return vmapped_get_blurred_sample_and_weight((x, c, keys))
     else:
         return nkjax.apply_chunked(
-            vmapped_get_bridge_sample_and_weight, in_axes=0, chunk_size=64
+            vmapped_get_blurred_sample_and_weight, in_axes=0, chunk_size=64
         )((x, c, keys))
