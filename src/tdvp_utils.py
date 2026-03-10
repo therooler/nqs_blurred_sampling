@@ -286,8 +286,8 @@ def randomized_bridge_sample(
         u1, u2, u3 = rng
         _x_shape = _x.shape
         _x = _x.reshape(-1)
-        # flip = random_flip_uniform_k(key, _x)
-        flip = 1 - 2 * jax.random.bernoulli(key, flip_prob, _x.shape)
+        flip = random_flip_uniform_k(key, _x)
+        # flip = 1 - 2 * jax.random.bernoulli(key, flip_prob, _x.shape)
         flip_proposed = flip * _x
 
         # Connected elements of Hamiltonian
