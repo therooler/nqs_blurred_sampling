@@ -1,7 +1,7 @@
 
 # Blurred Sampling
 
-Utilities and experiments for *bridge-sampled* time-dependent variational Monte Carlo (t-VMC) using NetKet.
+Utilities and experiments for *blurred sampling* time-dependent variational Monte Carlo (t-VMC) using NetKet.
 
 This repo contains:
 
@@ -22,11 +22,6 @@ python -m pip install -U pip
 
 ```bash
 python -m pip install -r requirements.txt
-```
-
-To install the infidelity optimization:
-```bash
-pip install git+https://github.com/NeuralQXLab/ptvmc-systematic-study
 ```
 
 ## Notebooks
