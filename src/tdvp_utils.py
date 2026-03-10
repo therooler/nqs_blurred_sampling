@@ -216,6 +216,14 @@ def blurred_sample(
             vmapped_get_blurred_sample_and_weight, in_axes=0, chunk_size=chunk_size, axis_0_is_sharded=False
         )((x, c))
 
+def random_flip_uniform_k(key, x):
+    ns = x.shape[-1]
+    key_k, key_perm = jax.random.split(key)
+    k = jax.random.randint(key_k, shape=(), minval=0, maxval=ns+1)
+    perm = jax.random.permutation(key_perm, ns)
+    m_order = jnp.arange(ns) < k 
+    mask = jnp.zeros(ns, dtype=bool).at[perm].set(m_order)
+    return jnp.where(mask, -1, 1)
 
 @partial(jax.jit, static_argnames=("apply_fn", "chunk_size"))
 def randomized_blurred_sample(
@@ -276,8 +284,8 @@ def randomized_blurred_sample(
         u1, u2, u3 = rng
         _x_shape = _x.shape
         _x = _x.reshape(-1)
-        # flip = random_flip_uniform_k(key, _x)
-        flip = 1 - 2 * jax.random.bernoulli(key, flip_prob, _x.shape)
+        flip = random_flip_uniform_k(key, _x)
+        # flip = 1 - 2 * jax.random.bernoulli(key, flip_prob, _x.shape)
         flip_proposed = flip * _x
 
         # Connected elements of Hamiltonian

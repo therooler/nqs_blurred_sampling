@@ -35,7 +35,7 @@ import netket.jax as nkjax
 from netket.experimental.driver.tdvp_common import TDVPBaseDriver, odefun
 from netket.experimental.dynamics._solver import AbstractSolver
 
-from src.tdvp_utils import make_monitor_dict, randomized_blurred_sample, ess_from_weights
+from tdvp_utils import make_monitor_dict, randomized_blurred_sample, ess_from_weights
 from jax.sharding import PartitionSpec as P
 
 import platform
