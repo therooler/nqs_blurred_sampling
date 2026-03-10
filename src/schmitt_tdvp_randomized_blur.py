@@ -35,7 +35,7 @@ import netket.jax as nkjax
 from netket.experimental.driver.tdvp_common import TDVPBaseDriver, odefun
 from netket.experimental.dynamics._solver import AbstractSolver
 
-from tdvp_utils import make_monitor_dict, randomized_blurred_sample, ess_from_weights
+from src.tdvp_utils import make_monitor_dict, randomized_blurred_sample, ess_from_weights
 from jax.sharding import PartitionSpec as P
 
 import platform
@@ -127,8 +127,9 @@ class TDVPSchmittRandomizedBlur(TDVPBaseDriver):
         variational_state: VariationalState,
         integrator: AbstractSolver = None,
         *,
-        q: float = 0.1,
-        flip_prob: float = 0.5,
+        q1: float = 0.1,
+        q2: float = 0.1,
+        flip_prob: float = 0.1,
         t0: float = 0.0,
         propagation_type: str = "real",
         holomorphic: bool | None = None,
@@ -206,9 +207,13 @@ class TDVPSchmittRandomizedBlur(TDVPBaseDriver):
 
         self._monitor = {}
 
-        if not (0 < q < 1):
-            raise ValueError(f"`q` must satisfy 0 < q < 1, received {q}")
-        self.q = q
+        if not (0 < q1 < 1):
+            raise ValueError(f"`q1` must satisfy 0 < q1 < 1, received {q1}")
+        self.q1 = q1
+        if not (0 < q2 < 1):
+            raise ValueError(f"`q2` must satisfy 0 < q2 < 1, received {q2}")
+        self.q2 = q2
+        self.q = [q1, q2]
         self.flip_prob = flip_prob
 
         if distributed_eigh and not JAXMG_ENABLED:
@@ -438,7 +443,8 @@ def odefun_custom(
         randomized_blurred_sample,
         apply_fn=state._apply_fun,
         op=op_t,
-        q=self.q,
+        q1=self.q1,
+        q2=self.q2,
         flip_prob=self.flip_prob,
         chunk_size=chunk_size,
     )(samples, key, w)
@@ -465,6 +471,7 @@ def odefun_custom(
         holomorphic=self.holomorphic,
         chunk_size=chunk_size,
     )
+
     (
         self._loss_stats,
         self._dw,
@@ -509,3 +516,50 @@ def ess_from_weights_var(w):
     s1_sq = jnp.mean(w, axis=0) ** 2
     s2 = jnp.mean(w**2, axis=0)
     return ((s1_sq / (s2 - s1_sq + jnp.finfo(w.dtype).eps))).squeeze()
+
+
+def main():
+    import netket as nk
+    from netket.experimental.dynamics import RK45
+    import flax.linen as nn
+
+    N = 4
+    alpha = 1
+    n_samples = 2**12
+    hilbert = nk.hilbert.Spin(s=1 / 2, N=N)
+    graph = nk.graph.Chain(N, pbc=True)
+    hamiltonian = nk.operator.IsingJax(hilbert=hilbert, graph=graph, h=1, J=-1.0)
+    sampler = nk.sampler.MetropolisLocal(hilbert, n_chains=n_samples)
+    model = nk.models.RBM(
+        alpha=alpha, param_dtype=complex, kernel_init=nn.initializers.normal(1e-1)
+    )
+    vstate = nk.vqs.MCState(
+        sampler=sampler, model=model, n_samples=n_samples, seed=100, sampler_seed=100
+    )
+
+    T = 0.5
+
+    integrator = RK45(1e-3, adaptive=True, rtol=1e-4, dt_limits=(1e-4, 1e-2))
+    tvmc_kwargs = {}
+    driver = TDVPSchmittRandomizedBlur(
+        hamiltonian,
+        vstate,
+        integrator,
+        t0=0,
+        q=0.2,
+        snr_atol=2,
+        rcond=1e-14,
+        rcond_smooth=1e-10,
+        distributed_eigh=True,
+        **tvmc_kwargs,
+    )
+
+    driver.run(
+        T,
+        show_progress=True,
+        timeit=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

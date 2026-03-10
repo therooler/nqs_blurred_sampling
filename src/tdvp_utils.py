@@ -219,9 +219,9 @@ def blurred_sample(
 
 @partial(jax.jit, static_argnames=("apply_fn", "chunk_size"))
 def randomized_blurred_sample(
-    x: Array, key, params, q: float, flip_prob: float, apply_fn, op: AbstractOperator, chunk_size
+    x: Array, key, params, q1: float, q2: float, flip_prob: float, apply_fn, op: AbstractOperator, chunk_size
 ):
-    """One-step "blurred" proposal with importance weights.
+    """One-step "bridge" proposal with importance weights.
 
     For each input configuration ``x[i]``, this kernel constructs a simple mixture proposal:
 
@@ -268,35 +268,51 @@ def randomized_blurred_sample(
     """
     batch_size = x.shape[0]
     key, subkey1, subkey2 = jax.random.split(key, 3)
-    c = jax.random.uniform(subkey1, shape=(batch_size, 1))
+    c = jax.random.uniform(subkey1, shape=(batch_size, 3))
     keys = jax.random.split(subkey2, batch_size)
 
     def get_blurred_sample_and_Eloc(_in):
         _x, rng, key = _in
-        u1 = rng
+        u1, u2, u3 = rng
         _x_shape = _x.shape
         _x = _x.reshape(-1)
-        flip = 1 - 2*jax.random.bernoulli(key, flip_prob, _x.shape)
-        proposed = _x * flip
+        # flip = random_flip_uniform_k(key, _x)
+        flip = 1 - 2 * jax.random.bernoulli(key, flip_prob, _x.shape)
+        flip_proposed = flip * _x
 
-        # choose a whether to flip or stay
-        x_p = jnp.where(u1 > q, _x, proposed)  # equivalent to u1 < 1-q
+        # Connected elements of Hamiltonian
+        x_conn, _ = op.get_conn_padded(_x)
+        # NOTE: get_conn_padded(_x) can contain diagonal elements, which correspond to "stay" configuration
+        # For Ising, the first element will be diagonal, we therefore only have nconn-1 off-diagonal elements
+        n_conn = x_conn.shape[-2] - 1
+        idx = jnp.floor(u1 * n_conn).astype(jnp.int32)
+        conn_proposed = x_conn[idx + 1]
+
+        proposed = jnp.where(u2 > q1/(q1 + q2), flip_proposed, conn_proposed)
+        q = q1 + q2
+        x_p = jnp.where(u3 > q, _x, proposed)
         
         # log |psi| for the blurred sample and its flipped configuration
         logpsi_stay = apply_fn({"params": params}, x_p)
-        logpsi_flip = apply_fn({"params": params}, x_p * flip)
         logp_stay = 2.0 * logpsi_stay.real
-        logp_flip = 2.0 * logpsi_flip.real 
-
-        # stable mixture weight: (1-q)*p(stay) + (q/n)*sum_j p(all_flipped_j)
         log_term_main = jnp.log1p(-q) + logp_stay
-        log_term_flips = jnp.log(q) + logp_flip
-        log_w_bridge = jsp.special.logsumexp(jnp.stack([log_term_main, log_term_flips]))
-        w_bridge = jnp.exp(logp_stay - log_w_bridge)  # scalar
 
-        # calculate local energy
+        logpsi_flip = apply_fn({"params": params}, flip * x_p)
+        logp_flip = 2.0 * logpsi_flip.real 
+        log_term_flip = jnp.log(q2) + logp_flip 
+
         x_p_conn, mels = op.get_conn_padded(x_p)
         logpsi_all = apply_fn({"params": params}, x_p_conn)
+        logp_all = 2.0 * logpsi_all.real  # (n,)
+        # stable mixture weight: (1-q)*p(stay) + (q/n)*sum_j p(all_flipped_j)
+        log_term_conn = (
+            jnp.log(q1) - jnp.log(n_conn) + jsp.special.logsumexp(logp_all[1:])
+        )
+
+        # stable mixture weight: (1-q)*p(stay) + (q/n)*sum_j p(all_flipped_j)
+        log_w_bridge = jsp.special.logsumexp(jnp.stack([log_term_main, log_term_flip, log_term_conn]))
+        w_bridge = jnp.exp(logp_stay - log_w_bridge)  # scalar
+
         # Calculate local energies
         E_loc = jnp.sum(
             mels * jnp.exp(logpsi_all - jnp.expand_dims(logpsi_stay, -1)), axis=-1
