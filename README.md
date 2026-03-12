@@ -5,8 +5,12 @@ Utilities and experiments for *bridge-sampled* time-dependent variational Monte 
 
 This repo contains:
 
-- A TDVP driver (`TDVPSchmittBlur`) implementing Schmitt-style SNR-based regularization and a simple “bridge” proposal kernel to improve sampling stability during real-time evolution.
-- A TFIM quench experiment script and plotting notebooks.
+- Code in folder `/src/` for performing t-VMC in Netket. 
+- We provide two TDVP driver (`TDVPSchmittBlur` and `TDVPSchmittRandomizedBlur`) that implement Schmitt-style SNR-based regularization and a simple blur proposal kernel to improve sampling stability during real-time evolution.
+- Code in folder `/paper/` to reproduce the figures in arxiv:xxxxxxx.
+- We provide the data to reproduce all the experiments in `/paper/data`
+
+All experiments should run in a reasonable time, except for figure 6(c), which requires multiple GPUs for several hours.
 
 ## Setup
 
@@ -24,18 +28,12 @@ python -m pip install -U pip
 python -m pip install -r requirements.txt
 ```
 
-To install the infidelity optimization:
-```bash
-pip install git+https://github.com/NeuralQXLab/ptvmc-systematic-study
-```
-
 ## Notebooks
 
-If you want to run notebooks:
+If you want to run the notebooks:
 
 ```bash
 python -m pip install jupyter
 jupyter lab
 ```
-
 
