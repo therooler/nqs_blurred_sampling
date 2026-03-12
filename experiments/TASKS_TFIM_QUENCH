@@ -1,1 +1,0 @@
-source ~/blurred_sampling/.venv/bin/activate && python -u tfim_quench_experiment.py --L=8 --power=16 --kernel_size=6 --hc_multiplier=0.1 &> outputs/tfim_quench.N8_P16.out

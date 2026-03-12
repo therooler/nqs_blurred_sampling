@@ -36,7 +36,7 @@ import netket.jax as nkjax
 from netket.experimental.driver.tdvp_common import TDVPBaseDriver, odefun
 from netket.experimental.dynamics._solver import AbstractSolver
 
-from tdvp_utils import make_monitor_dict, bridge_sample, ess_from_weights
+from tdvp_utils import make_monitor_dict, blurred_sample, ess_from_weights
 from jax.sharding import PartitionSpec as P
 
 import platform
@@ -418,7 +418,7 @@ def odefun_custom(state: MCState, self: TDVPGeometric, t, w, *, stage=0):  # noq
     state._sampler_seed, key = jax.random.split(state._sampler_seed, 2)
 
     samples_q, importance_weights, E_loc = HashablePartial(
-        bridge_sample,
+        blurred_sample,
         apply_fn=state._apply_fun,
         op=op_t,
         q=self.q,
@@ -579,7 +579,7 @@ def main():
 
     integrator = RK45(1e-3, adaptive=True, rtol=1e-4, dt_limits=(1e-4, 1e-2))
     tvmc_kwargs = {}
-    driver = TDVPSchmittBridge(
+    driver = TDVPSchmittBlur(
         hamiltonian,
         vstate,
         integrator,

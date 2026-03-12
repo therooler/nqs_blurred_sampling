@@ -5,7 +5,7 @@ Utilities and experiments for *bridge-sampled* time-dependent variational Monte 
 
 This repo contains:
 
-- A TDVP driver (`TDVPSchmittBridge`) implementing Schmitt-style SNR-based regularization and a simple “bridge” proposal kernel to improve sampling stability during real-time evolution.
+- A TDVP driver (`TDVPSchmittBlur`) implementing Schmitt-style SNR-based regularization and a simple “bridge” proposal kernel to improve sampling stability during real-time evolution.
 - A TFIM quench experiment script and plotting notebooks.
 
 ## Setup
