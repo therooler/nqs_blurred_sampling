@@ -184,7 +184,6 @@ def get_parameter_save_callback(save_times, logger, starting_idx=0):
             logger.save_parameters(
                 driver.state, var_name=f"_{idx[0] + starting_idx}"
             )
-            print("Saved parameters...")
             save_times_tracked[idx] = -1
         return True
 
