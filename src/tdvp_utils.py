@@ -336,3 +336,118 @@ def randomized_blurred_sample(
         return nkjax.apply_chunked(
             vmapped_get_blurred_sample_and_weight, in_axes=0, chunk_size=64
         )((x, c, keys))
+    
+
+
+
+@partial(jax.jit, static_argnames=("apply_fn", "chunk_size"))
+def blurred_sample_general(
+    x: Array, key, params, q: float, apply_fn, op: AbstractOperator, chunk_size
+):
+    """One-step "bridge" proposal with importance weights.
+
+    For each input configuration ``x[i]``, this kernel constructs a simple mixture proposal:
+
+    - with probability ``q`` it keeps the configuration unchanged;
+    - with probability ``1-q`` it proposes a *single* random connected configuration sampled
+      uniformly from ``op.get_conn_padded(x[i])``.
+
+    The returned scalar weight ``w_bridge`` corrects expectations from this mixture proposal to
+    the target density :math:`p(\sigma) \propto |\psi(\sigma)|^2` (computed from
+    ``apply_fn({'params': params}, ·).real``).
+
+    Parameters
+    ----------
+    x:
+        Array of shape ``(batch, n_dof)`` (or generally ``(batch, ...)``) containing the input
+        configurations.
+    key:
+        JAX PRNGKey.
+    params:
+        Parameters passed to ``apply_fn``.
+    q:
+        Mixture parameter in ``[0, 1]`` controlling the probability of *staying* at the current
+        configuration.
+    apply_fn:
+        Callable such that ``apply_fn({'params': params}, x)`` returns ``log(psi(x))`` (possibly
+        complex). Only the real part is used to form :math:`|\psi|^2`.
+    op:
+        Operator providing ``get_conn_padded`` returning connected configurations and matrix
+        elements.
+    chunk_size:
+        If not ``None``, evaluates the per-sample function with ``nkjax.apply_chunked``.
+
+    Returns
+    -------
+    x_p:
+        Array with the same shape as ``x`` containing the proposed (or unchanged) configurations.
+    w_bridge:
+        Array of shape ``(batch,)`` with importance weights
+        :math:`w = p_{\mathrm{target}}(x_p) / p_{\mathrm{mix}}(x_p)`, where
+        :math:`p_{\mathrm{target}}(\sigma) \propto |\psi(\sigma)|^2` and
+        :math:`p_{\mathrm{mix}}(\sigma) = q\,p_{\mathrm{target}}(\sigma) + (1-q)\,\frac{1}{n}\sum_j p_{\mathrm{target}}(\sigma_j)`.
+    E_loc:
+        Local energy estimate for each proposed configuration ``x_p[i]``.
+    """
+    batch_size = x.shape[0]
+    # rng for u1, u2 per configuration
+    keys = jax.random.split(key, batch_size * 2).reshape(batch_size, 2, -1)
+
+    def get_blurred_sample_and_Eloc(_in):
+        _x, rng = _in
+        key_stay, key_conn = rng[0], rng[1]
+        _x_shape = _x.shape
+        _x = _x.reshape(-1)
+        # Connected elements of Hamiltonian
+        x_conn, mels_orig = op.get_conn_padded(_x)
+        n_conn = x_conn.shape[-2]
+        # Uniform pdf over non-zero mels only
+        nonzero_mask = (mels_orig != 0) & ~jnp.all(x_conn == _x, axis=-1)  # (n_conn,)
+        probs = nonzero_mask / jnp.sum(nonzero_mask)
+        idx = jax.random.choice(key_conn, n_conn, p=probs)
+        proposed = x_conn[idx]
+        # jax.debug.print("n_conn_all={}\nnconn={}\n", n_conn_all, jnp.sum(nonzero_mask))
+        # choose whether to stay or move
+        u1 = jax.random.uniform(key_stay)
+        x_p = jnp.where(u1 > q, _x, proposed)
+        x_p_conn, mels = op.get_conn_padded(x_p)
+        # Calculate the number of connected elements for all connected elements
+        n_conn_all = jax.vmap(partial(get_nconn, op=op))(x_p_conn)
+        # log |psi| for flipped and all neighbors
+        logpsi_stay = apply_fn({"params": params}, x_p)
+        logpsi_all = apply_fn({"params": params}, x_p_conn)
+        # target density ∝ |psi|^2
+        logp_stay = 2.0 * logpsi_stay.real
+        logp_all = 2.0 * logpsi_all.real  # (n,)
+        offdiag_mask_p = (mels != 0) & ~jnp.all(x_p_conn == x_p, axis=-1)
+        logp_all_masked = jnp.where(offdiag_mask_p, logp_all, -jnp.inf)
+        # stable mixture weight: (1-q)*p(stay) + (q/n)*sum_j p(all_flipped_j)
+        log_term_main = jnp.log1p(-q) + logp_stay
+        log_term_flips = jsp.special.logsumexp(logp_all_masked, b=q / n_conn_all)
+
+        log_w_bridge = jsp.special.logsumexp(jnp.stack([log_term_main, log_term_flips]))
+        w_bridge = jnp.exp(logp_stay - log_w_bridge)  # scalar
+        # Calculate local energies
+        E_loc = jnp.sum(
+            mels * jnp.exp(logpsi_all - jnp.expand_dims(logpsi_stay, -1)), axis=-1
+        )
+        return x_p.reshape(_x_shape), w_bridge, jnp.atleast_1d(E_loc)
+
+    vmapped_get_blurred_sample_and_weight = jax.vmap(
+        get_blurred_sample_and_Eloc, in_axes=0
+    )
+    if chunk_size is None:
+        return vmapped_get_blurred_sample_and_weight((x, keys))
+    else:
+        return nkjax.apply_chunked(
+            vmapped_get_blurred_sample_and_weight,
+            in_axes=0,
+            chunk_size=chunk_size,
+            axis_0_is_sharded=False,
+        )((x, keys))
+
+
+def get_nconn(_x, op):
+    x_conn, mels = op.get_conn_padded(_x)
+    offdiag = (mels != 0) & ~jnp.all(x_conn == _x, axis=-1)
+    return jnp.sum(offdiag).astype(mels.real.dtype)
