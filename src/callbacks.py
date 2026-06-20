@@ -296,7 +296,10 @@ def get_umbrella_monitor_callback(save_times, save_path):
         log["snrF_min"] = _to_float(monitor.get("snrF_min", np.nan))
         log["snrF_med"] = _to_float(monitor.get("snrF_med", np.nan))
         # Current bridge parameter q (kept in [0,1])
-        log["q_bridge"] = _to_float(driver.q, np.nan)
+        try:
+            log["q_bridge"] = _to_float(driver.q, np.nan)
+        except AttributeError:
+            log["q_bridge"] = np.nan
         hit = np.isclose(step, save_times_tracked, atol=driver.dt)
         if np.any(hit):
             idx = np.where(np.isclose(step, save_times_tracked, atol=driver.dt))[0]

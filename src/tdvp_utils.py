@@ -216,6 +216,49 @@ def blurred_sample(
             vmapped_get_blurred_sample_and_weight, in_axes=0, chunk_size=chunk_size, axis_0_is_sharded=False
         )((x, c))
 
+@partial(jax.jit, static_argnames=("apply_fn", "chunk_size"))
+def overdispersed_sample(
+    x: Array, params, alpha: float, apply_fn, op: AbstractOperator, chunk_size
+):
+    """Compute IS weights and local energies for samples drawn from |ψ|^alpha.
+
+    Given samples already drawn from the distribution proportional to |ψ(x)|^alpha,
+    computes importance weights correcting to the target density |ψ|^2, and the
+    local energy for each sample.
+
+    Parameters
+    ----------
+    x : Array of shape (batch, n_dof) — samples from |ψ|^alpha
+    params : Parameters passed to apply_fn
+    alpha : Exponent of the proposal distribution. alpha=2 gives unit IS weights.
+    apply_fn : Callable returning log(psi(x)) for given params and x
+    op : Operator providing get_conn_padded
+    chunk_size : If not None, chunk the vmapped evaluation
+
+    Returns
+    -------
+    x : Same as input (pass-through)
+    importance_weights : (batch,) IS weights w = exp((2 - alpha) * Re(logψ(x)))
+    E_loc : (batch,) local energy estimates
+    """
+    def _per_sample(_x):
+        x_conn, mels = op.get_conn_padded(_x)
+        logpsi = apply_fn({"params": params}, _x)
+        logpsi_c = apply_fn({"params": params}, x_conn)
+        w = jnp.exp((2.0 - alpha) * logpsi.real)
+        E_loc = jnp.sum(mels * jnp.exp(logpsi_c - jnp.expand_dims(logpsi, -1)), axis=-1)
+        return w, jnp.atleast_1d(E_loc)
+
+    vmapped = jax.vmap(_per_sample)
+    if chunk_size is None:
+        importance_weights, E_loc = vmapped(x)
+    else:
+        importance_weights, E_loc = nkjax.apply_chunked(
+            vmapped, in_axes=0, chunk_size=chunk_size, axis_0_is_sharded=False
+        )(x)
+    return x, importance_weights, E_loc.squeeze(-1)
+
+
 def random_flip_uniform_k(key, x):
     ns = x.shape[-1]
     key_k, key_perm = jax.random.split(key)
