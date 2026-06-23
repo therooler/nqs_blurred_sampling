@@ -242,11 +242,12 @@ def overdispersed_sample(
     E_loc : (batch,) local energy estimates
     """
     def _per_sample(_x):
+        _x = _x.reshape(-1)
         x_conn, mels = op.get_conn_padded(_x)
-        logpsi = apply_fn({"params": params}, _x)
+        logpsi = apply_fn({"params": params}, _x.reshape(1, -1)).reshape(())
         logpsi_c = apply_fn({"params": params}, x_conn)
         w = jnp.exp((2.0 - alpha) * logpsi.real)
-        E_loc = jnp.sum(mels * jnp.exp(logpsi_c - jnp.expand_dims(logpsi, -1)), axis=-1)
+        E_loc = jnp.sum(mels * jnp.exp(logpsi_c - logpsi), axis=-1)
         return w, jnp.atleast_1d(E_loc)
 
     vmapped = jax.vmap(_per_sample)

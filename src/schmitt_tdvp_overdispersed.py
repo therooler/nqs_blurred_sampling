@@ -158,7 +158,6 @@ class TDVPSchmittOverdispersed(TDVPBaseDriver):
         if not (0 < alpha <= 2):
             raise ValueError(f"`alpha` must satisfy 0 < alpha <= 2, received {alpha}")
         self.alpha = alpha
-
         if distributed_eigh and not JAXMG_ENABLED:
             raise ImportError(
                 "distributed_eigh=True requires jaxmg to be installed and enabled. "
@@ -410,6 +409,7 @@ def odefun_custom(
         self._rmd, ess, self._snr, self._snr_F, self._ev, self._ev_reg
     )
     if stage == 0:
+        self.importance_weights = importance_weights
         self._last_qgt = self._S
 
     return self._dw

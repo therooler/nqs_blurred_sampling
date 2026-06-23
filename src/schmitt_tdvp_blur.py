@@ -491,6 +491,7 @@ def odefun_custom(
         self._rmd, ess, self._snr, self._snr_F, self._ev, self._ev_reg
     )
     if stage == 0:
+        self.importance_weights = importance_weights
         self._last_qgt = self._S
 
     return self._dw
