@@ -409,3 +409,51 @@ def get_complex_structure(state, rtol: float = 1e-10):
     omega = nk.optimizer.qgt.QGTJacobianDense(state, mode="imag").to_dense()
     J = -pinv(g, omega, rtol=rtol)
     return J
+
+
+def _get_overdispersed_samples_and_weights(driver):
+    state = driver.state
+    if hasattr(driver, "sampling_state") and driver.sampling_state is not None:
+        sampling_state = driver.sampling_state
+        sampling_state.parameters = jax.tree.map(
+            lambda x, y: x.astype(y.dtype), state.parameters, sampling_state.parameters
+        )
+        sampling_state.reset()
+        samples = sampling_state.samples
+        alpha = getattr(driver, "alpha", 2.0)
+    else:
+        samples = state.samples
+        alpha = 2.0
+
+    flat_samples = samples.reshape(-1, samples.shape[-1])
+    logpsi = state._apply_fun({"params": state.parameters}, flat_samples)
+    weights = jnp.exp((2.0 - alpha) * logpsi.real)
+    weights = weights / jnp.sum(weights)
+    return flat_samples, weights
+
+
+def get_overdispersed_diagonal_observable_callback(log_key, observable_fn):
+    """Estimate a diagonal observable using the overdispersed sampling weights.
+
+    The callback logs two scalar entries:
+    - ``log_key``: weighted mean
+    - ``f"{log_key}_variance"``: weighted variance
+    """
+
+    def observable_callback(step, log, driver):
+        samples, weights = _get_overdispersed_samples_and_weights(driver)
+        values = observable_fn(samples)
+        mean = jnp.sum(weights * values)
+        variance = jnp.sum(weights * jnp.abs(values - mean) ** 2)
+        log[log_key] = mean
+        log[f"{log_key}_variance"] = variance
+        return True
+
+    return observable_callback
+
+
+def get_overdispersed_parity_callback(log_key="parity_overdispersed"):
+    return get_overdispersed_diagonal_observable_callback(
+        log_key,
+        lambda samples: jnp.prod(samples, axis=-1),
+    )

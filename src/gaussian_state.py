@@ -262,6 +262,7 @@ class GaussianState(nn.Module):
     param_dtype: Any = jnp.float64
     parametrization: str = "dense"  # "dense" or "banded"
     band_k: int = 10  # only used if banded
+    init_noise_std: float = 1e-3
 
     @nn.compact
     def __call__(self, x) -> Any:
@@ -273,13 +274,13 @@ class GaussianState(nn.Module):
             num = (2 * n - 1) * n
             H1_raw = self.param(
                 "H1_raw",
-                nn.initializers.normal(0.001),
+                nn.initializers.normal(self.init_noise_std),
                 (num,),
                 self.param_dtype,
             )
             H2_raw = self.param(
                 "H2_raw",
-                nn.initializers.normal(0.001),
+                nn.initializers.normal(self.init_noise_std),
                 (num,),
                 self.param_dtype,
             )
@@ -290,13 +291,13 @@ class GaussianState(nn.Module):
             num = N * (k - 1)
             H1_raw = self.param(
                 "H1_raw",
-                nn.initializers.normal(0.001),
+                nn.initializers.normal(self.init_noise_std),
                 (num,),
                 self.param_dtype,
             )
             H2_raw = self.param(
                 "H2_raw",
-                nn.initializers.normal(0.001),
+                nn.initializers.normal(self.init_noise_std),
                 (num,),
                 self.param_dtype,
             )
